@@ -368,6 +368,7 @@ DEFAULT_FORECAST_PARAMS = {
     "allowedTiming": ("EARLY", "BUILDING"), "rrGate": 1.0, "blend": None,
     "unanimity": False, "cooldown": 0, "auditBars": 100000, "minWinRate": None,
     "minExpMult": 1.0, "entryBefore": None,
+    "sessionOnly": False, "requireEma50": False, "requireRsiExtreme": False,
 }
 
 
@@ -394,12 +395,17 @@ def _tech_alignment(candles, direction):
     if rsi[i] is not None and (rsi[i] >= 60 or rsi[i] <= 40):
         votes["RSI 14"] = 1 if rsi[i] >= 60 else -1
     unanimous = bool(votes) and len(votes) >= 3 and all(v == sign for v in votes.values()) and sign != 0
+    e50 = ema_series(closes, 50)[-1] if len(closes) >= 50 else None
     return {
         "score": norm,
         "conviction": round(abs(norm) * 100, 1) if norm is not None else None,
         "votes": votes,
         "unanimous": unanimous,
         "against": sum(1 for v in votes.values() if v == -sign),
+        "rsi": rsi[i],
+        "ema50": e50,
+        "ema50Ok": (e50 is not None and sign != 0
+                    and ((closes[i] > e50) if sign > 0 else (closes[i] < e50))),
     }
 
 
@@ -420,7 +426,9 @@ def build_forecast(spot, candles, options, signal, timeframe, min_move, max_move
     sign = 1 if direction == "BULLISH" else (-1 if direction == "BEARISH" else 0)
     horizon = 1 if timeframe != "5m" else p["horizon"]
     horizon_label = ("next session" if timeframe != "5m"
-                     else f"next ~{horizon * 5} min ({horizon} x 5m candles)")
+                     else (f"next ~{horizon * 5} min, closed by 15:25 IST"
+                           if p.get("sessionOnly")
+                           else f"next ~{horizon * 5} min ({horizon} x 5m candles)"))
     closes = [c["close"] for c in candles]
     atr = (atr_series(candles, 14) or [None])[-1]
     align = _tech_alignment(candles, direction) if timeframe == "5m" else None
@@ -485,7 +493,7 @@ def build_forecast(spot, candles, options, signal, timeframe, min_move, max_move
             stop = spot - sign * min_move * p["stopMoveMult"]
             risk = abs(spot - stop)
             stop_adjusted = True
-            reasons.append(f"75% profile: stop set at {p['stopMoveMult']}× the "
+            reasons.append(f"Precision profile: stop set at {p['stopMoveMult']}× the "
                            f"{min_move}-pt target ({_r(risk)} pts). Wide stop, lower R:R — "
                            f"that is what makes T1-before-SL reliable.")
         elif atr and risk < p["stopAtr"] * atr:
@@ -537,6 +545,13 @@ def build_forecast(spot, candles, options, signal, timeframe, min_move, max_move
         status = f"TIMING {timing['label']} — WAIT FOR TRIGGER"
     if status == "OPPORTUNITY" and p.get("unanimity") and align and not align["unanimous"]:
         status = f"INDICATORS SPLIT ({align['against']} against) — NO TRADE"
+    if status == "OPPORTUNITY" and p.get("requireEma50") and align \
+            and not align.get("ema50Ok"):
+        status = f"NOT ALIGNED WITH EMA 50 ({'below' if sign > 0 else 'above'}) — NO TRADE"
+    if status == "OPPORTUNITY" and p.get("requireRsiExtreme") and align:
+        rv = align.get("rsi")
+        if rv is None or not ((rv >= 60) if sign > 0 else (rv <= 40)):
+            status = "RSI NOT AT AN EXTREME — NO TRADE"
     if status == "OPPORTUNITY" and p.get("minTechConviction") \
             and (align or {}).get("conviction") is not None \
             and align["conviction"] < p["minTechConviction"]:
@@ -545,8 +560,11 @@ def build_forecast(spot, candles, options, signal, timeframe, min_move, max_move
         status = "LOW CONVICTION"
     if status == "OPPORTUNITY" and p.get("minWinRate"):
         measured = (audit or {}).get("winRate")
+        measured_n = (audit or {}).get("samples") or 0
         if measured is None:
             status = "PROFILE AUDIT UNAVAILABLE — NO CALL"
+        elif measured_n < 30:
+            status = f"PROFILE AUDIT SAMPLE TOO SMALL ({measured_n} < 30) — NO CALL"
         elif measured < p["minWinRate"]:
             status = f"PROFILE EDGE WEAK ({measured}% < {p['minWinRate']}%)"
     if status == "OPPORTUNITY" and capture and p["minCapture"] \
@@ -582,21 +600,34 @@ def build_forecast(spot, candles, options, signal, timeframe, min_move, max_move
                   "stopAtr": p["stopAtr"], "stopMoveMult": p.get("stopMoveMult"),
                   "minTechConviction": p.get("minTechConviction"),
                   "minWinRate": p.get("minWinRate"),
-                  "minExpMult": p.get("minExpMult"), "entryBefore": p.get("entryBefore")},
+                  "minExpMult": p.get("minExpMult"), "entryBefore": p.get("entryBefore"),
+                  "requireEma50": bool(p.get("requireEma50")),
+                  "requireRsiExtreme": bool(p.get("requireRsiExtreme")),
+                  "sessionOnly": bool(p.get("sessionOnly"))},
         "plan": plan,
         "reasons": reasons,
     }
 
 
 
-def validate_forecast(candles, min_move, params=None, lookback=1000):
+def validate_forecast(candles, min_move, params=None, lookback=1000, since_ts=None,
+                      examples_limit=6):
     """Walk-forward audit of a forecast profile on the instrument's own 5m candles.
 
     At every historical bar only information available up to that bar is used. A setup
     counts only if it would have passed the same gates as live (conviction, unanimity,
-    expected move, profile timing), with the same one-at-a-time cooldown. Outcome = T1
-    (minimum move) hit before stop within the horizon; if both are touched inside one
-    candle the stop is assumed first (conservative).
+    EMA 50 regime, extreme RSI, measured capture, expected move, profile timing), with the
+    same one-at-a-time cooldown. Outcome = T1 (minimum move) hit before stop; both touched in
+    one candle counts as a stop (conservative).
+
+    With `sessionOnly` the outcome window closes at 15:25 IST on the entry day, so an
+    intraday call can never be rescued overnight; a call that hits neither level is a
+    timeout closed at that last price and is NOT counted as a win.
+
+    T2 (2× min move) and T3 (3× min move) are tracked on the same path with the same
+    conservative same-candle rule, so `t2Rate` / `t3Rate` answer "target reached before the
+    stop" without letting a later stop erase an earlier target. `since_ts` restricts counted
+    entries to bars at/after that timestamp while still warming indicators on the full series.
     """
     p = _forecast_params(params)
     horizon = p["horizon"]
@@ -604,14 +635,33 @@ def validate_forecast(candles, min_move, params=None, lookback=1000):
     if n < horizon + 60:
         return None
     closes, e9, e21, rsi, hist, _, st_dir = _tech_features(candles)
+    e50 = ema_series(closes, 50)
     atrs = atr_series(candles, 14)
-    start = max(40, n - (p.get("auditBars") or lookback))
-    samples = wins = losses = unresolved = reach = 0
-    risk_sum = 0.0
-    resolved_risk_sum = 0.0
+    session_only = bool(p.get("sessionOnly"))
+    day_end = [0] * n
+    if session_only:
+        for i in range(n - 1, -1, -1):
+            day_end[i] = (i if (i == n - 1 or (candles[i + 1]["t"] + 19800) // 86400
+                                != (candles[i]["t"] + 19800) // 86400) else day_end[i + 1])
+    start = max(50, n - (p.get("auditBars") or lookback))
+    window_bars = n - start
+    window_start = candles[start]["t"]
+    if since_ts:
+        first = next((j for j in range(start, n) if candles[j]["t"] >= since_ts), n)
+        window_bars = n - first
+        window_start = candles[first]["t"] if first < n else candles[-1]["t"]
+    samples = wins = losses = timeouts = unresolved = reach = 0
+    t2wins = t3wins = 0
+    risk_sum = pnl_sum = 0.0
     bars_to_t1, examples, months = [], [], {}
     last_exit, cooldown = -10 ** 9, p.get("cooldown") or 0
+    last_day = None
     for i in range(start, n - horizon):
+        if since_ts and candles[i]["t"] < since_ts:
+            continue
+        day = (candles[i]["t"] + 19800) // 86400
+        if session_only and day != last_day:
+            last_day, last_exit = day, -10 ** 9
         if i <= last_exit + cooldown:
             continue
         norm = _tech_score_at(i, e9, e21, rsi, hist, st_dir)
@@ -633,6 +683,12 @@ def validate_forecast(candles, min_move, params=None, lookback=1000):
                 votes.append(1 if rsi[i] >= 60 else -1)
             if any(v != sign for v in votes):
                 continue
+        if p.get("requireEma50"):
+            if e50[i] is None or (closes[i] > e50[i]) != (sign > 0):
+                continue
+        if p.get("requireRsiExtreme"):
+            if rsi[i] is None or not ((rsi[i] >= 60) if sign > 0 else (rsi[i] <= 40)):
+                continue
         expected = atr * math.sqrt(horizon) * 0.8
         if expected < min_move:
             continue
@@ -647,16 +703,272 @@ def validate_forecast(candles, min_move, params=None, lookback=1000):
                               st_dir=st_dir, macd_hist=hist, idx=i)
         if timing["label"] not in p["allowedTiming"]:
             continue
+        if p.get("minCapture"):
+            cap = _capture_at(candles, closes, e9, e21, rsi, hist, st_dir,
+                              i, sign, min_move, horizon)
+            if cap is None or cap < p["minCapture"]:
+                continue
         entry = closes[i]
         stop_dist = min_move * p["stopMoveMult"] if p.get("stopMoveMult") else p["stopAtr"] * atr
         stop = entry - sign * stop_dist
         t1 = entry + sign * min_move
-        outcome, bars = "open", None
-        mfe = 0.0
-        for k, c in enumerate(candles[i + 1:i + 1 + horizon], 1):
+        t2 = entry + sign * min_move * 2
+        t3 = entry + sign * min_move * 3
+        end = (min(i + horizon, day_end[i]) if session_only else min(i + horizon, n - 1))
+        mfe, stop_bar, t1_bar, t2_bar, t3_bar = 0.0, None, None, None, None
+        for k, c in enumerate(candles[i + 1:end + 1], 1):
             fav = (c["high"] - entry) if sign > 0 else (entry - c["low"])
-            mfe = max(mfe, fav)  # full-horizon excursion, even after the trade resolves
-            if outcome != "open":
+            mfe = max(mfe, fav)  # excursion through the whole window, even after resolution
+            hit_sl = c["low"] <= stop if sign > 0 else c["high"] >= stop
+            if hit_sl:
+                stop_bar = stop_bar or k
+                continue  # conservative: a candle touching the stop never upgrades a target
+            if stop_bar is not None:
+                continue
+            if t1_bar is None and (c["high"] >= t1 if sign > 0 else c["low"] <= t1):
+                t1_bar = k
+            if t2_bar is None and (c["high"] >= t2 if sign > 0 else c["low"] <= t2):
+                t2_bar = k
+            if t3_bar is None and (c["high"] >= t3 if sign > 0 else c["low"] <= t3):
+                t3_bar = k
+        if t1_bar is not None:
+            outcome, bars = "t1", t1_bar
+        elif stop_bar is not None:
+            outcome, bars = "stop", stop_bar
+        elif session_only:
+            outcome, bars = "timeout", end - i
+        else:
+            outcome, bars = "open", None
+        samples += 1
+        t2wins += 1 if t2_bar is not None else 0
+        t3wins += 1 if t3_bar is not None else 0
+        month = datetime.datetime.fromtimestamp(
+            candles[i]["t"] + 19800, datetime.timezone.utc).strftime("%Y-%m")
+        mb = months.setdefault(month, {"samples": 0, "wins": 0})
+        mb["samples"] += 1
+        risk_sum += stop_dist
+        if outcome == "t1":
+            pnl = min_move
+        elif outcome == "stop":
+            pnl = -stop_dist
+        elif outcome == "timeout":
+            pnl = (candles[end]["close"] - entry) * sign
+        else:
+            pnl = 0.0
+        pnl_sum += pnl
+        last_exit = end
+        if outcome == "t1":
+            wins += 1
+            mb["wins"] += 1
+            bars_to_t1.append(bars)
+        elif outcome == "stop":
+            losses += 1
+        elif outcome == "timeout":
+            timeouts += 1
+        else:
+            unresolved += 1
+        if outcome == "t1" or mfe >= min_move:
+            reach += 1
+        exit_px = (t1 if outcome == "t1" else stop if outcome == "stop"
+                   else candles[end]["close"])
+        examples.append({
+            "barTime": candles[i]["t"], "direction": direction,
+            "entry": _r(entry), "expected": _r(expected, 1),
+            "stop": _r(stop), "stopDist": _r(stop_dist, 1),
+            "target1": _r(t1), "target2": _r(t2), "target3": _r(t3),
+            "targetsHit": (3 if t3_bar is not None else 2 if t2_bar is not None
+                           else 1 if t1_bar is not None else 0),
+            "outcome": outcome, "bars": bars,
+            "minutes": bars * 5 if bars is not None else None,
+            "exit": _r(exit_px),
+            "r": round(pnl / stop_dist, 2) if stop_dist else None,
+            "mfe": _r(mfe, 1),
+            "atr": _r(atr, 1),
+        })
+        if examples_limit:
+            examples = examples[-examples_limit:]
+    if not samples:
+        return {"profile": p["name"], "samples": 0, "lowSample": True,
+                "minMove": min_move, "horizon": horizon,
+                "note": "No historical setup passed this profile's gates in the lookback window."}
+    avg_risk = risk_sum / samples
+    month_rates = [{"month": m, "samples": v["samples"],
+                    "winRate": round(v["wins"] / v["samples"] * 100, 1)}
+                   for m, v in sorted(months.items())]
+    solid = [m["winRate"] for m in month_rates if m["samples"] >= 5]
+    return {
+        "profile": p["name"], "profileKey": p["key"],
+        "minMove": min_move, "horizon": horizon, "horizonLabel": f"{horizon * 5} min",
+        "stopAtr": p["stopAtr"], "stopMoveMult": p.get("stopMoveMult"),
+        "stopRule": (f"{p['stopMoveMult']}× min move" if p.get("stopMoveMult")
+                     else f"{p['stopAtr']}×ATR"),
+        "unanimity": bool(p.get("unanimity")), "cooldown": cooldown,
+        "minExpMult": p.get("minExpMult"), "entryBefore": p.get("entryBefore"),
+        "minCapture": p.get("minCapture"), "sessionOnly": session_only,
+        "requireEma50": bool(p.get("requireEma50")),
+        "requireRsiExtreme": bool(p.get("requireRsiExtreme")),
+        "lookbackBars": window_bars,
+        "windowStart": window_start, "windowEnd": candles[n - 1]["t"],
+        "sinceTs": since_ts,
+        "samples": samples, "wins": wins, "losses": losses, "timeouts": timeouts,
+        "unresolved": unresolved,
+        "winRate": round(wins / samples * 100, 1),
+        "t2Wins": t2wins, "t2Rate": round(t2wins / samples * 100, 1),
+        "t3Wins": t3wins, "t3Rate": round(t3wins / samples * 100, 1),
+        "winRateResolved": round(wins / (wins + losses) * 100, 1) if (wins + losses) else None,
+        "reachRate": round(reach / samples * 100, 1),
+        "avgRisk": round(avg_risk, 1),
+        "rr1": round(min_move / avg_risk, 2) if avg_risk else None,
+        "avgR": round(pnl_sum / samples / avg_risk, 3) if avg_risk else None,
+        "expectancyPts": round(pnl_sum / samples, 1) if samples else None,
+        "avgBarsToT1": round(sum(bars_to_t1) / len(bars_to_t1), 1) if bars_to_t1 else None,
+        "lowSample": samples < 15,
+        "months": month_rates,
+        "worstMonth": (min(solid) if solid else min(m["winRate"] for m in month_rates)),
+        "examples": examples,
+    }
+
+def _capture_at(candles, closes, e9, e21, rsi, hist, st_dir, i, sign, min_move, horizon,
+                lookback=300, threshold=0.18):
+    """Live `move_capture` restricted to bars <= i (no lookahead)."""
+    start = max(34, i - lookback)
+    wins = samples = 0
+    for j in range(start, i - horizon + 1):
+        norm = _tech_score_at(j, e9, e21, rsi, hist, st_dir)
+        if norm is None or norm * sign <= threshold:
+            continue
+        fut = candles[j + 1:j + 1 + horizon]
+        if not fut:
+            continue
+        best = (max(c["high"] for c in fut) - closes[j]) if sign > 0 \
+            else (closes[j] - min(c["low"] for c in fut))
+        samples += 1
+        wins += 1 if best >= min_move else 0
+    if samples < 20:
+        return None
+    return round(wins / samples * 100, 1)
+
+
+def session_stats(calls):
+    t1 = [c for c in calls if c["outcome"] == "t1"]
+    sl = [c for c in calls if c["outcome"] == "stop"]
+    closed = [c for c in calls if c["outcome"] != "open"]
+    resolved = len(t1) + len(sl)
+    return {
+        "calls": len(calls), "t1": len(t1), "sl": len(sl),
+        "timeouts": sum(1 for c in calls if c["outcome"] == "timeout"),
+        "open": sum(1 for c in calls if c["outcome"] == "open"),
+        # Timeouts are trades that never reached T1 before the session close: not wins.
+        "winRate": round(len(t1) / len(calls) * 100, 1) if calls else None,
+        "winRateResolved": round(len(t1) / resolved * 100, 1) if resolved else None,
+        "reach": sum(1 for c in calls if c["reach"]),
+        "avgT1Min": round(sum(c["minutes"] for c in t1) / len(t1), 1) if t1 else None,
+        "avgSLMin": round(sum(c["minutes"] for c in sl) / len(sl), 1) if sl else None,
+        "avgR": round(sum(c.get("r") or 0 for c in closed) / len(closed), 3) if closed else None,
+        "avgMfe": round(sum(c["mfe"] for c in calls) / len(calls), 1) if calls else None,
+    }
+
+
+def replay_session(candles, min_move, max_move, params=None, day=None):
+    """Replay one IST session bar by bar with the same gates the live forecast uses.
+
+    At bar i only bars <= i decide the call; the outcome uses bars i+1..i+horizon and a
+    candle touching both T1 and SL is scored as a stop, like the audit. With `sessionOnly`
+    the outcome window closes at that session's last bar: a call that hits neither level is
+    a timeout (closed at the last price) and is not a win. Without it, calls still open when
+    the data ends are returned as `open` with elapsed time and MFE so far.
+    """
+    p = _forecast_params(params)
+    horizon = p["horizon"]
+    if day is None:
+        day = datetime.datetime.fromtimestamp(
+            datetime.datetime.now(datetime.timezone.utc).timestamp() + 19800,
+            datetime.timezone.utc).date()
+    n = len(candles)
+    calls = []
+    if n < horizon + 50:
+        return {"day": day.isoformat(), "profile": p["key"], "calls": calls,
+                "stats": session_stats(calls)}
+    closes, e9, e21, rsi, hist, _, st_dir = _tech_features(candles)
+    e50 = ema_series(closes, 50)
+    atrs = atr_series(candles, 14)
+    session_only = bool(p.get("sessionOnly"))
+    last_idx = max((j for j in range(n)
+                    if datetime.datetime.fromtimestamp(candles[j]["t"] + 19800,
+                                                      datetime.timezone.utc).date() == day),
+                   default=-1)
+    today_ist = datetime.datetime.fromtimestamp(
+        datetime.datetime.now(datetime.timezone.utc).timestamp() + 19800,
+        datetime.timezone.utc).date()
+    last_min = (((candles[last_idx]["t"] + 19800) % 86400) // 60
+                if last_idx >= 0 else 0)
+    session_closed = bool(session_only and last_idx >= 0
+                          and (day < today_ist or last_min >= 15 * 60 + 25))
+    last_exit = -10 ** 9
+    for i in range(max(50, 0), last_idx + 1):
+        if datetime.datetime.fromtimestamp(candles[i]["t"] + 19800,
+                                           datetime.timezone.utc).date() != day:
+            continue
+        if i <= last_exit + (p.get("cooldown") or 0):
+            continue
+        norm = _tech_score_at(i, e9, e21, rsi, hist, st_dir)
+        if norm is None or abs(norm) * 100 < max(p["minConviction"],
+                                                 p.get("minTechConviction") or 0):
+            continue
+        sign = 1 if norm > 0 else -1
+        atr = atrs[i]
+        if not atr:
+            continue
+        if p.get("unanimity"):
+            votes = [1 if (e9[i] is not None and e21[i] is not None and e9[i] > e21[i]) else -1]
+            if hist[i] is None or st_dir[i] is None:
+                continue
+            votes += [1 if hist[i] > 0 else -1, st_dir[i]]
+            if rsi[i] is not None and (rsi[i] >= 60 or rsi[i] <= 40):
+                votes.append(1 if rsi[i] >= 60 else -1)
+            if any(v != sign for v in votes):
+                continue
+        if p.get("requireEma50"):
+            if e50[i] is None or (closes[i] > e50[i]) != (sign > 0):
+                continue
+        if p.get("requireRsiExtreme"):
+            if rsi[i] is None or not ((rsi[i] >= 60) if sign > 0 else (rsi[i] <= 40)):
+                continue
+        expected = atr * math.sqrt(horizon) * 0.8
+        if expected < min_move:
+            continue
+        if p.get("minExpMult") and expected < min_move * p["minExpMult"]:
+            continue
+        if p.get("entryBefore") and ((candles[i]["t"] + 19800) % 86400) // 60 > p["entryBefore"]:
+            continue
+        direction = "BULLISH" if sign > 0 else "BEARISH"
+        timing = _move_timing(candles, direction, atr, expected,
+                              st_dir=st_dir, macd_hist=hist, idx=i)
+        if timing["label"] not in p["allowedTiming"]:
+            continue
+        if p.get("minCapture"):
+            cap = _capture_at(candles, closes, e9, e21, rsi, hist, st_dir,
+                              i, sign, min_move, horizon)
+            if cap is None or cap < p["minCapture"]:
+                continue
+        stop_dist = (min_move * p["stopMoveMult"] if p.get("stopMoveMult")
+                     else p["stopAtr"] * atr)
+        entry = closes[i]
+        stop = entry - sign * stop_dist
+        t1_move = min_move
+        t2_move = min(max(expected, min_move), max_move)
+        t3_move = t2_move + max(t2_move - t1_move, t1_move)
+        if p.get("rrGate") and t2_move / stop_dist < p["rrGate"]:
+            continue
+        t1, t2, t3 = (entry + sign * t1_move, entry + sign * t2_move,
+                      entry + sign * t3_move)
+        end = min(i + horizon, last_idx) if session_only else min(i + horizon, n - 1)
+        outcome = ("timeout" if session_closed else "open")
+        bars, mfe = None, 0.0
+        for k, c in enumerate(candles[i + 1:end + 1], 1):
+            fav = (c["high"] - entry) if sign > 0 else (entry - c["low"])
+            mfe = max(mfe, fav)
+            if outcome not in ("open", "timeout"):
                 continue
             hit_t1 = c["high"] >= t1 if sign > 0 else c["low"] <= t1
             hit_sl = c["low"] <= stop if sign > 0 else c["high"] >= stop
@@ -666,66 +978,33 @@ def validate_forecast(candles, min_move, params=None, lookback=1000):
                 outcome, bars = "t1", k
             elif hit_sl:
                 outcome, bars = "stop", k
-        samples += 1
-        month = datetime.datetime.fromtimestamp(
-            candles[i]["t"] + 19800, datetime.timezone.utc).strftime("%Y-%m")
-        mb = months.setdefault(month, {"samples": 0, "wins": 0})
-        mb["samples"] += 1
-        risk_sum += abs(entry - stop)
-        last_exit = i + horizon
-        if outcome in ("t1", "stop"):
-            resolved_risk_sum += abs(entry - stop)
+        if outcome == "timeout":
+            bars = end - i
         if outcome == "t1":
-            wins += 1
-            mb["wins"] += 1
-            bars_to_t1.append(bars)
+            pnl = t1_move
         elif outcome == "stop":
-            losses += 1
+            pnl = -stop_dist
+        elif outcome == "timeout":
+            pnl = (candles[end]["close"] - entry) * sign
         else:
-            unresolved += 1
-        if outcome == "t1" or mfe >= min_move:
-            reach += 1
-        examples.append({
-            "barTime": candles[i]["t"], "direction": direction,
-            "entry": _r(entry), "expected": _r(expected, 1),
-            "stop": _r(stop), "target1": _r(t1),
-            "outcome": outcome, "bars": bars, "mfe": _r(mfe, 1),
+            pnl = 0.0
+        last_exit = end if session_only else i + horizon
+        calls.append({
+            "t": candles[i]["t"], "side": "LONG" if sign > 0 else "SHORT",
+            "entry": _r(entry), "stop": _r(stop),
+            "t1": _r(t1), "t2": _r(t2), "t3": _r(t3),
+            "m1": t1_move, "m2": round(t2_move, 1), "m3": round(t3_move, 1),
+            "sd": round(stop_dist, 1),
+            "rr1": round(t1_move / stop_dist, 2) if stop_dist else None,
+            "rr2": round(t2_move / stop_dist, 2) if stop_dist else None,
+            "outcome": outcome, "bars": bars,
+            "minutes": (bars * 5) if bars is not None else (end - i) * 5,
+            "mfe": _r(mfe, 1), "reach": mfe >= min_move,
+            "r": round(pnl / stop_dist, 3) if stop_dist else None,
+            "exp": round(expected, 1), "atr": round(atr, 1),
         })
-        examples = examples[-6:]
-    if not samples:
-        return {"profile": p["name"], "samples": 0, "lowSample": True,
-                "minMove": min_move, "horizon": horizon,
-                "note": "No historical setup passed this profile's gates in the lookback window."}
-    avg_risk = risk_sum / samples
-    resolved = wins + losses
-    avg_resolved_risk = (resolved_risk_sum / resolved) if resolved else 0.0
-    expectancy = ((wins * min_move - losses * avg_resolved_risk) / resolved) if resolved else None
-    return {
-        "profile": p["name"], "profileKey": p["key"],
-        "minMove": min_move, "horizon": horizon, "horizonLabel": f"{horizon * 5} min",
-        "stopAtr": p["stopAtr"], "stopMoveMult": p.get("stopMoveMult"),
-        "stopRule": (f"{p['stopMoveMult']}× min move" if p.get("stopMoveMult")
-                     else f"{p['stopAtr']}×ATR"),
-        "unanimity": bool(p.get("unanimity")), "cooldown": cooldown,
-        "minExpMult": p.get("minExpMult"), "entryBefore": p.get("entryBefore"),
-        "lookbackBars": n - start,
-        "windowStart": candles[start]["t"], "windowEnd": candles[n - 1]["t"],
-        "samples": samples, "wins": wins, "losses": losses, "unresolved": unresolved,
-        "winRate": round(wins / samples * 100, 1),
-        "reachRate": round(reach / samples * 100, 1),
-        "avgRisk": round(avg_risk, 1),
-        "rr1": round(min_move / avg_risk, 2) if avg_risk else None,
-        "expectancyPts": round(expectancy, 1) if expectancy is not None else None,
-        "avgBarsToT1": round(sum(bars_to_t1) / len(bars_to_t1), 1) if bars_to_t1 else None,
-        "lowSample": samples < 15,
-        "months": [{"month": m, "samples": v["samples"],
-                    "winRate": round(v["wins"] / v["samples"] * 100, 1)}
-                   for m, v in sorted(months.items())],
-        "worstMonth": min(round(v["wins"] / v["samples"] * 100, 1)
-                          for v in months.values()),
-        "examples": examples,
-    }
-
+    return {"day": day.isoformat(), "profile": p["key"], "calls": calls,
+            "stats": session_stats(calls), "sessionOnly": session_only}
 
 def build_signal(spot, candles, options, timeframe):
     closes, e9, e21, rsi, hist, st_line, st_dir = _tech_features(candles)

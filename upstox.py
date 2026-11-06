@@ -43,6 +43,30 @@ def token_seconds_left(token):
         return None
 
 
+def exchange_code(code, redirect_uri, key, secret):
+    """Swap a login `code` for an access token (Upstox v2 token endpoint)."""
+    body = urllib.parse.urlencode({
+        "code": code, "client_id": key, "client_secret": secret,
+        "redirect_uri": redirect_uri, "grant_type": "authorization_code",
+    }).encode()
+    req = urllib.request.Request(BASE + "/login/authorization/token", data=body,
+                                 headers={"Accept": "application/json",
+                                          "Content-Type": "application/x-www-form-urlencoded",
+                                          "User-Agent": _UA})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise UpstoxError("Token exchange failed: "
+                          + exc.read().decode("utf-8", "ignore")[:300]) from None
+    except Exception as exc:
+        raise UpstoxError("Token exchange failed: " + str(exc)) from None
+    token = (res or {}).get("access_token")
+    if not token:
+        raise UpstoxError("No access_token in Upstox response")
+    return token
+
+
 class UpstoxClient:
     def __init__(self, token):
         self.token = token
@@ -109,6 +133,10 @@ class UpstoxClient:
                 continue
         out.sort(key=lambda c: c["t"])
         return out
+
+    def profile(self):
+        """Cheapest call that proves a token is accepted by Upstox."""
+        return self._get(BASE + "/user/profile") or {}
 
     # ---------------------------------------------------------------- options
 

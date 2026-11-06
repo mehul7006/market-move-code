@@ -12,7 +12,7 @@
     <div class="brand-mark">▲</div>
     <div>
       <h1>Market Signal Desk</h1>
-      <p>Sensex · Nifty · segment research — live Upstox data · pre-move point forecasts · entries, SL, targets, OI &amp; Greeks</p>
+      <p>Sensex · Nifty · Bank Nifty · Fin Nifty · Midcap Select · Next 50 — live Upstox data · per-segment precision calls · OI &amp; Greeks</p>
     </div>
   </div>
   <div class="topbar-right">
@@ -24,8 +24,11 @@
       <span class="track"><span class="thumb"></span></span>
       <span class="switch-label">Live · 5s</span>
     </label>
-    <button class="btn btn-accent" id="researchBtn">Research</button>
+    <button class="btn btn-accent" id="todayBtn">Today's calls</button>
+    <button class="btn" id="overnightBtn">Next-day</button>
+    <button class="btn" id="researchBtn">Research</button>
     <button class="btn" id="proofBtn">Proof</button>
+    <button class="btn" id="accessBtn">Access</button>
     <button class="btn" id="refreshBtn">Refresh</button>
   </div>
 </header>
@@ -83,19 +86,36 @@
 <footer class="disclaimer">
   <strong>Educational research tool — not investment advice.</strong>
   Every number on this desk comes from the live Upstox feed (or Yahoo real candles as a labelled fallback)
-  — there is no mock mode. If a feed fails you will see a red error, never invented data. The generic
-  signal's walk-forward hit-rate is typically 50–62%. The 75% precision profile on Nifty/Sensex is a
-  wide-stop base rate (stop 3.4× the target, R:R ≈0.29, break-even ≈77%) measured over six months —
-  a higher hit rate, not a free lunch. Derivatives carry substantial risk of loss.
+  — there is no mock mode. If a feed fails you will see a red error, never invented data. Calls are issued
+  only for Sensex, Nifty, Bank Nifty, Fin Nifty, Midcap Select and Next 50; sector indices are chart context
+  only. Each segment runs its own six-month tested profile (session-bounded at 15:25 IST, unanimous
+  indicators, wide stop) and may call only while its measured T1-before-stop rate is ≥75%. Those are
+  in-sample base rates, not a forward guarantee: the wide stop puts R:R near 0.25–0.4, so break-even is
+  roughly 71–80% before costs. Derivatives carry substantial risk of loss.
 </footer>
+
+<div class="modal-backdrop hidden" id="accessModal">
+  <div class="modal modal-narrow">
+    <div class="modal-head">
+      <div>
+        <h2>Access — Upstox token &amp; public link</h2>
+        <p class="modal-sub">Paste a fresh Upstox access token, or the full address you were redirected
+          to after logging in. It is checked with Upstox first, then saved to the gitignored <b>.env</b>
+          and applied to the running server — no restart, no code edit.</p>
+      </div>
+      <button class="modal-close" id="accessClose" aria-label="Close">✕</button>
+    </div>
+    <div id="accessBody"></div>
+  </div>
+</div>
 
 <div class="modal-backdrop hidden" id="researchModal">
   <div class="modal">
     <div class="modal-head">
       <div>
-        <h2>Research scanner</h2>
-        <p class="modal-sub">Choose which segments to scan — the engine researches each on live data and
-          ranks final predictions by conviction.</p>
+        <h2>Research scanner — six call-enabled segments</h2>
+        <p class="modal-sub">Scan Sensex, Nifty, Bank Nifty, Fin Nifty, Midcap Select and Next 50 on live
+          data. Each segment is judged by its own measured profile; sector indices are context only.</p>
       </div>
       <button class="modal-close" id="researchClose" aria-label="Close">✕</button>
     </div>
@@ -114,6 +134,36 @@
       <button class="modal-close" id="proofClose" aria-label="Close">✕</button>
     </div>
     <div id="proofBody"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="todayModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h2>Today's calls — six index segments, replayed through the live gates</h2>
+        <p class="modal-sub">Every setup today's own rules would have issued on Sensex, Nifty, Bank Nifty,
+          Fin Nifty, Midcap Select and Next 50, with entry, stop, T1/T2/T3, result, duration and stop-hit
+          count. Outcomes close at 15:25 IST: a timeout is not a win. No lookahead.</p>
+      </div>
+      <button class="modal-close" id="todayClose" aria-label="Close">✕</button>
+    </div>
+    <div id="todayBody"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="overnightModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h2>Next-day model — buy today's close, sell tomorrow's close</h2>
+        <p class="modal-sub">A separate long-only overnight book. It only speaks when an index closes
+          oversold (RSI 14 ≤ 38 and a 3-day return ≤ −1%), buys that close, and exits at the next
+          session's close. The intraday desk above is unchanged and keeps its own 75% profiles.</p>
+      </div>
+      <button class="modal-close" id="overnightClose" aria-label="Close">✕</button>
+    </div>
+    <div id="overnightBody"></div>
   </div>
 </div>
 

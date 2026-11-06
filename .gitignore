@@ -1,6 +1,11 @@
 .env
+.env.tmp
 __pycache__/
+tools/
+nginx/.htpasswd
+nginx/logs/
 server.log
+verify.log
 api.json
 .candle_cache/
 proof-ui-*.png

@@ -1,10 +1,11 @@
 # Market Signal Desk
 
-Local real-data dashboard for **Sensex, Nifty 50, Bank Nifty, Fin Nifty, Midcap Select and 11 Nifty sector
-indices**. Click a segment to get its final signal from the current level — direction, entry, stop-loss,
-T1/T2/T3, conviction, the full strategy board (every vote with its raw inputs), real option/OI analytics
-(PCR, max pain, OI flow, put/call walls, ATM IV, straddle, Greeks) and a walk-forward hit-rate measured
-on that instrument's own candles.
+Local real-data dashboard for **Sensex, Nifty 50, Bank Nifty, Fin Nifty, Midcap Select, Next 50 and 10
+Nifty sector indices**. The six index segments generate entry/SL/T1/T2/T3 calls, each through its own
+six-month tested profile. Sector indices are chart context only — they never generate calls. Click any
+segment to see its direction, conviction, the full strategy board (every vote with its raw inputs), real
+option/OI analytics (PCR, max pain, OI flow, put/call walls, ATM IV, straddle, Greeks) and a walk-forward
+hit-rate measured on that instrument's own candles.
 
 ## Run
 
@@ -14,6 +15,51 @@ python server.py            # Python 3.10+, stdlib only - no pip install
 ```
 
 Open **http://localhost:8787**. The page polls every 5 s while the "Live · 5s" switch is on.
+
+## Use it from anywhere — ngrok tunnel + nginx
+
+```bash
+python share.py                # start ngrok (downloads it once), print the public URL + logins
+python share.py --nginx-only   # only write/refresh the nginx reverse-proxy config
+python share.py --status       # current public URL and credentials
+python share.py --stop         # stop the tunnel share.py started
+```
+
+`share.py` creates the access secrets in the gitignored `.env` the first time and prints them:
+
+- `DESK_USER` / `DESK_PASS` — HTTP Basic login for the public link. It is enforced by the app
+  itself, so it protects the ngrok URL too (ngrok points straight at 8787, bypassing nginx).
+  Browsers ask once; the same credentials also satisfy the nginx auth block.
+- `DESK_ADMIN_KEY` — unlocks the in-page **Access** panel that swaps the Upstox token.
+  It has nothing to do with the Upstox secret; it only guards the token-write endpoint.
+- `NGROK_AUTHTOKEN` — your ngrok authtoken, used from `.env` or ngrok's own saved login;
+  if neither exists the script asks once and saves it.
+
+nginx: the script writes `nginx/market-desk.conf` and `nginx/.htpasswd`, then prints the exact
+command for the nginx build on this machine (`E:\nginx-1.28.3`):
+
+```bash
+"E:\nginx-1.28.3\nginx.exe" -p "E:\nginx-1.28.3" -c "<repo>\nginx\market-desk.conf"
+```
+
+It proxies `http://localhost:8899` → `127.0.0.1:8787` with no caching and a 5-minute read timeout
+(the Proof audit is deliberately slow). Port 8899 is used because 8080 is already taken here; change
+it with `--nginx-port`. Reload after editing: add `-s reload`. `--no-password` writes a config
+without auth — trusted networks only. To disable the app-side login, delete `DESK_USER` and
+`DESK_PASS` from `.env`.
+
+ngrok's free tier shows its own browser warning page on the first visit to a new link; click through
+it once. The page's API calls send `ngrok-skip-browser-warning`, so the dashboard itself is unaffected.
+
+### Paste the Upstox token in the page
+
+The header **Access** button opens the panel. Paste either the access token or the full URL you were
+redirected to after Upstox login (its `code=` is exchanged using the secret already in `.env`).
+The server validates the token against Upstox's profile endpoint *before* writing anything, then
+saves it to `.env`, swaps the live client and clears the caches — no restart and no code edit. The
+panel also shows the token's remaining life, a live Nifty quote proving the feed works, and the
+current public URL. The token itself is never returned by the API or rendered in the page, and the
+endpoint refuses requests without `DESK_ADMIN_KEY`.
 
 ## Data policy — real feed or a visible error, never mock data
 
@@ -51,13 +97,14 @@ python upstox_login.py https://your-app-redirect-uri
 ```
 
 The redirect URI must be the one registered on your Upstox app. Open the printed login URL, log in,
-copy the `code=` value from the redirected address, paste it, then restart `server.py`. The new token
-is written into `.env`.
+copy the `code=` value from the redirected address, paste it — the token is written into `.env` and
+the running server picks it up on the next request. Or skip the terminal entirely and paste the token
+(or the whole redirected URL) into the **Access** panel in the header.
 
 ## Move forecast — only fires when the minimum move is realistic
 
-Each signal gets a real expected-move forecast (3 hours / 36 × 5m candles for the Nifty and Sensex
-precision profile, ~60 minutes / 12 × 5m elsewhere, or next session on the Yahoo daily fallback):
+Each signal gets a real expected-move forecast. The six call-enabled segments use their own measured
+precision profile (45–54 × 5m horizon, closed by 15:25 IST); sectors show chart context and no call:
 
 - three independent estimators: ATR(14) × √horizon, realized candle σ × spot × √horizon, and the
   ATM straddle scaled from expiry to the horizon — the displayed estimate is their median, and the
@@ -67,92 +114,134 @@ precision profile, ~60 minutes / 12 × 5m elsewhere, or next session on the Yaho
 - a pre-move timing check: `EARLY` (range compressed at the 20-bar breakout edge, fresh
   Supertrend/MACD flip), `BUILDING`, `IN PROGRESS` (already broke out), `EXTENDED` (move mostly done)
 - a trade plan with **three targets**: T1 = the minimum required move, T2 = the expected move clamped
-  to the target zone, T3 = T2 + one more T2−T1 step (the stretch target). The precision profile sets
-  the stop at 3.4 × the minimum move; the standard profile widens the structural stop to 0.5 × ATR
-  when it sits inside market noise.
+  to the target zone, T3 = T2 + one more T2−T1 step (the stretch target). The precision profiles set
+  the stop at 2.5–4 × the minimum move.
 
-A call is shown as `OPPORTUNITY · PRE-MOVE` only when **all** of the active profile's gates pass:
-non-neutral direction, expected move ≥ minimum, conviction ≥ 55 with a 100% technical score
-(EMA 9/21 + MACD + Supertrend + an extreme RSI all agreeing), an ATR-expected move ≥ 4 × the target,
-entry before 14:30 IST, timing still EARLY or BUILDING, and the live six-month audit still measuring
-≥ 75% T1-before-SL for Nifty/Sensex. Otherwise the card shows the exact blocking reason
+A call is shown as `OPPORTUNITY · PRE-MOVE` only when **all** of that segment's gates pass:
+non-neutral direction, expected move ≥ minimum, a 100% technical score (EMA 9/21 + MACD + Supertrend;
+RSI only votes at extremes), an ATR-expected move ≥ 4 × the target (5 × on Next 50), entry before
+14:00/14:30 IST, timing still EARLY or BUILDING, the segment's EMA 50 / extreme-RSI / capture-odds
+filters, and its live six-month audit still measuring ≥ 75% T1-before-stop over **all calls**
+(timeouts count as non-wins). Otherwise the card shows the exact blocking reason
 (`BELOW MIN MOVE`, `ATR EXPECTED MOVE … REQUIRED`, `ENTRY WINDOW CLOSED`, `LOW CONVICTION`,
-`LOW SETUP QUALITY`, `INDICATORS SPLIT`, `PROFILE EDGE WEAK`, `LOW CAPTURE ODDS`,
-`MOVE ALREADY STARTED`, `RISK > REWARD`, `NO BIAS`) and the advice says no trade — it never forces
-a prediction.
+`LOW SETUP QUALITY`, `INDICATORS SPLIT`, `NOT ALIGNED WITH EMA 50`, `RSI NOT AT AN EXTREME`,
+`PROFILE EDGE WEAK`, `PROFILE AUDIT SAMPLE TOO SMALL`, `LOW CAPTURE ODDS`, `MOVE ALREADY STARTED`,
+`RISK > REWARD`, `NO BIAS`) and the advice says no trade — it never forces a prediction.
 
-Per-instrument minimum / target-zone points: Sensex 40–80, Nifty 25–50, Bank Nifty 50–100,
-Fin Nifty 30–60, Midcap Select 20–40, sectors 10–60 depending on index level.
+Per-segment T1 / target zone: Sensex 40–80, Nifty 25–50, Bank Nifty 50–100, Fin Nifty 30–60,
+Midcap Select 20–40, Next 50 60–120 points. Sector indices show no plan at all.
 
-The research scanner re-runs this forecast on every selected segment, ranks qualifying pre-move calls
-first, and reports `N of M segments qualifying`. If nothing qualifies it says so and lists the nearest
-candidate — no fabricated call.
+The research scanner re-runs the forecast on the six call-enabled segments, ranks qualifying pre-move
+calls first, and reports `N of 6 segments qualifying`. If nothing qualifies it says so and lists the
+nearest candidate — no fabricated call.
 
-## 75% precision profile — measured, and gated at 75%
+## Six call-enabled segments — measured ≥75% T1-before-stop, session-bounded
 
-The old 60-minute / 0.5 × ATR plan hit T1 before SL only ~41% on Nifty because the stop was much
-tighter than the fixed 25-pt target. The precision profile (`analysis.py` + `server.py`) fixes that
-by changing the trade geometry and the entry quality together:
+The old generic 60-minute / 0.5 × ATR plan hit T1 before the stop only ~41–44%, because the stop was
+much tighter than the fixed target. The fix is not one universal rule: each of the six index segments
+gets its own measured profile. They share the geometry (wide stop, unanimous trend/momentum indicators,
+high expected-move filter, early entry cutoff, one trade at a time with a 15-minute cooldown) and differ
+in horizon, stop multiple, entry cutoff and quality filters.
 
-| Rule | Value |
-|---|---|
-| Horizon | 36 × 5m (3 h) |
-| Stop | 3.4 × the minimum-move target (Nifty 85 pts, Sensex 136 pts) |
-| Entry filter | EMA 9/21, MACD, Supertrend and an extreme RSI must all agree (technical score 100%) |
-| Expected move | ATR(14) × √36 × 0.8 ≥ 4 × the minimum target |
-| Timing | EARLY or BUILDING only, entry before 14:30 IST |
-| Conviction | aggregate signal ≥ 55 |
-| Sequencing | one trade at a time, 3-bar (15 min) cooldown |
-| Live gate | refuses new calls if the six-month audit drops below 75% |
+| Segment | T1 | Horizon | Stop | Entry by | Extra filter | Setups | **T1 win · all calls** | Worst month | Reach | Avg risk | R:R | Avg R | Exp / setup |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BSE Sensex | 40 | 54 (4.5 h) | 3.0 × T1 | 14:30 | EMA 50 + extreme RSI | 173 | **79.2%** | 70.4% | 89.6% | 120 pts | 0.33 | +0.059 | +7.1 pts |
+| Nifty 50 | 25 | 54 | 2.5 × T1 | 14:00 | EMA 50 + capture 55% | 114 | **77.2%** | 71.4% | 84.2% | 62.5 pts | 0.40 | +0.088 | +5.5 pts |
+| Bank Nifty | 50 | 54 | 4.0 × T1 | 14:00 | capture 55% | 123 | **78.9%** | 71.4% | 85.4% | 200 pts | 0.25 | +0.004 | +0.7 pts |
+| Fin Nifty | 30 | 54 | 2.5 × T1 | 14:00 | capture 55% | 121 | **80.2%** | 61.9% | 84.3% | 75 pts | 0.40 | +0.126 | +9.4 pts |
+| Midcap Select | 20 | 54 | 4.0 × T1 | 14:30 | extreme RSI | 146 | **78.8%** | 70.4% | 81.5% | 80 pts | 0.25 | +0.049 | +4.0 pts |
+| Next 50 | 60 | 45 (3.75 h) | 4.0 × T1 | 14:30 | EMA 50 + capture 55%, exp ≥5× | 153 | **78.4%** | 70.6% | 85.0% | 240 pts | 0.25 | −0.006 | −1.4 pts |
 
-Six months of that instrument's own 5m bars (mid-May → Nov 2026, every bar the feed returned):
+Measured over six months of each segment's own 5m bars (11 May → 6 Nov 2026, 9,325 bars — every bar
+the feed returned). "T1 win · all calls" = T1 hit before the stop ÷ every setup, with **timeouts counted as
+non-wins**. Outcomes are session-bounded: the window closes at 15:25 IST on the entry day, so a call
+that hits neither level is a timeout closed at the last price, not an overnight rescue. A candle that
+touches both levels is scored as a stop first. The live gate re-runs this audit on every refresh and
+refuses calls when the measured rate is below 75% or the sample is under 30 setups.
 
-| Instrument | Setups | T1-before-SL win | Worst month | Reach | Avg risk | R:R at T1 | Expectancy |
+**Read this honestly.**
+
+- These parameters were selected on the same six months they are measured on. The rates are
+  **in-sample**, not a forward guarantee. A different six months can be worse; the floor is a
+  continuously re-run audit gate, not a promise.
+- The high hit rate is bought with a wide stop. R:R at T1 is 0.25–0.4, so break-even is roughly
+  71–80% before costs. Bank Nifty and Next 50 are near zero expectancy even at ~79% hits; Fin Nifty
+  and Nifty show a small positive average R. Check the Avg R / Exp columns rather than the hit rate
+  alone.
+- One month can be weak: Fin Nifty's worst month measured 61.9%, Bank Nifty's 200-pt stop means one
+  stop wipes several T1 wins.
+- Sector indices are deliberately excluded from call generation. `research_opt.py` and
+  `.research/segment_study2.py` reproduce the search offline with the same no-lookahead outcome
+  chronology.
+
+### Last 30 days — T1, T2 and all three targets before the stop
+
+The Proof panel re-runs the same profiles and gates on the newest 30 calendar days (07 Oct → 06 Nov
+2026, all bars merged with the live intraday tail). T1 is the minimum move; T2 = 2× and T3 = 3× that
+move. A target counts only when touched before the stop, and a candle touching a target and the stop
+together is scored as a stop (conservative). Timeouts are not wins.
+
+| Segment | Calls | T1 before SL | T2 before SL | T3 (all) before SL | Stops | Timeouts | Avg R (exit at T1) |
 |---|---|---|---|---|---|---|---|
-| Nifty 50 | 124 | **77.4%** | 62.5% | 79.0% | 85 pts | 0.29 | +5.3 pts |
-| BSE Sensex | 186 | **76.9%** | 59.1% | 89.8% | 136 pts | 0.29 | −0.7 pts |
-| Bank Nifty (same rule, not tuned) | 179 | 75.4% | 63.3% | 83.2% | 170 pts | 0.29 | −1.2 pts |
-| Fin Nifty (same rule, not tuned) | 153 | 72.5% | 52.4% | 77.1% | 102 pts | 0.29 | −1.6 pts |
+| BSE Sensex | 26 | 76.9% | 76.9% | 65.4% | 6 | 0 | +0.026 |
+| Nifty 50 | 21 | 81.0% | 47.6% | 42.9% | 4 | 0 | +0.133 |
+| Bank Nifty | 21 | 90.5% | 71.4% | 57.1% | 2 | 0 | +0.131 |
+| Fin Nifty | 21 | 85.7% | 76.2% | 57.1% | 3 | 0 | +0.200 |
+| Midcap Select | 29 | 79.3% | 65.5% | 51.7% | 2 | 4 | +0.078 |
+| Next 50 | 30 | 80.0% | 70.0% | 56.7% | 5 | 1 | +0.010 |
 
-The previous 69% profile is kept as `BALANCED` and audited side by side in the Proof panel
-(Nifty 238 setups / 69.3%, Sensex 238 / 66.8%, R:R 0.45).
+One month is 21–30 setups per segment, so these are recent samples, not new proof. T2/T3 describe a
+multi-target variant; the deployed call plan still exits at T1, so the Avg R column uses the T1 exit.
+The six-month table above remains the basis for the live ≥75% gate.
 
-**Read this honestly.** 75%+ is real here, but it is bought with a very wide stop: R:R is ≈0.29 and
-the break-even hit rate is ≈77%, so expectancy is roughly flat before costs (Nifty slightly positive,
-Sensex slightly negative). One bad month measures ~59–62%, so the 75% floor is a long-run audit gate,
-not a per-week promise. 80–85% needs a stop of ~3.8 × the target (~3.5 × ATR) and clearly negative
-expectancy, so it is deliberately not offered as an accuracy claim. `research_opt.py` reproduces the
-whole search offline, including the outcome chronology (entry bar excluded from the outcome window).
+The same section has **All 148 calls — entry, T1/T2/T3 and SL**: a lazy-loaded, newest-first row view
+of every call behind those percentages (date/time IST, segment, side, entry, T1/T2/T3, SL, outcome,
+exit, MFE, bars, R), plus filter buttons (All / T1 hit / T2 hit / T3 hit / Stops / Timeouts) and a
+**Download CSV** link that follows the active filter. The data comes from:
+
+```
+GET /api/calls?days=30                 # JSON: segments, totals, every call
+GET /api/calls?days=30&filter=t2       # only calls that reached T2 before the stop
+GET /api/calls?days=30&filter=t2&format=csv
+```
+
+`filter` accepts `all`, `t1`, `t2`, `t3`, `sl`, `to`. `verify.py` re-runs these rows from its own
+independent Upstox pull and diffs entry, T1, T2, T3, SL and outcome for every call, and checks that
+the T2 filter returns exactly the recomputed T2 hits — not just the aggregate percentages.
 
 ## Proof and independent verification
 
 Two ways to check that the predictions are computed from real market data:
 
-1. **Proof button** in the header — provenance (quote/candle/option source, bars, last bar, last close),
-   the live forecast profile, and a no-lookahead walk-forward audit of that exact profile on every 5m
-   bar the feed returns (180 days for Nifty/Sensex, 30 days for the rest): setups, wins/losses,
-   T1-before-SL win rate, worst month, minimum move reached, average bars to T1, average risk,
-   R:R at T1, expectancy, plus the last six audited setups.
+1. **Proof button** in the header — provenance for all six call-enabled segments (quote/candle/option
+   source, bars, last bar, last close), the live forecast profile, and a no-lookahead walk-forward
+   audit of that exact profile on six months of 5m bars: setups, wins/losses/timeouts, T1-before-stop
+   win rate over all calls, worst month, minimum move reached, average bars to T1, average risk,
+   R:R at T1, average R, break-even hit rate and expectancy, plus the last six audited setups.
+   A last-30-days table adds separately measured T1, T2 and T3-before-stop rates per segment, and a
+   "Load all N calls" view lists every one of those calls with T1/T2/T3, SL, exit, MFE and R (CSV too).
 2. **`python verify.py`** — a separate CLI that pulls Upstox quotes/history and Yahoo 5m bars *again*,
-   diffs every overlapping bar against the dashboard, pulls its own six-month history, recomputes both
-   audits and exits non-zero on any mismatch. It never trusts the dashboard's own numbers.
+   diffs every overlapping bar against the dashboard, pulls its own six-month history for all six
+   segments, recomputes every audit and exits non-zero on any mismatch. It never trusts the dashboard's
+   own numbers.
 
 ```bash
 python server.py     # terminal 1
 python verify.py     # terminal 2 — prints PASS/FAIL per check
 ```
 
-The audit is honest by construction: at bar *i* it only sees bars ≤ *i*; the outcome uses the next
-horizon; one trade at a time with the same cooldown the live profile uses; a candle touching both T1
-and SL is scored as a stop; "reach" (minimum move touched at any point) is reported separately from
-the tradable win rate. Historical option chains do not exist in the feed, so OI/Greeks affect the
-live forecast only and are never claimed as backtested. Expectancy is shown next to the win rate so
-the wide-stop trade-off is visible rather than hidden.
+The audit is honest by construction: at bar *i* it only sees bars ≤ *i*; the outcome window is capped
+at 15:25 IST on the entry day; one trade at a time with the same cooldown the live profile uses; a
+candle touching both T1 and the stop is scored as a stop; a call that hits neither is a timeout closed
+at the last price and is **not** a win; "reach" (minimum move touched at any point) is reported
+separately from the tradable win rate. Historical option chains do not exist in the feed, so OI/Greeks
+affect the live forecast only and are never claimed as backtested. Average R and expectancy are shown
+next to the hit rate so the wide-stop trade-off is visible rather than hidden.
 
 ## Research scanner
 
-The **Research** button in the header asks which segments to scan, then runs a forced refresh and ranks
-them:
+The **Research** button in the header scans the six call-enabled segments (sector indices are not
+selectable), then runs a forced refresh and ranks them:
 
 - breadth (bullish / bearish / neutral), scan verdict and highest-conviction pick
 - per-segment direction, confidence, entry, stop, T1/T2/T3, PCR, max pain, OI flow, IV, timeframe, drivers
@@ -160,11 +249,66 @@ them:
 
 `/api/research?segments=SENSEX,NIFTY` returns the same report as JSON.
 
+## Today's calls
+
+The **Today's calls** button replays the session bar by bar for the six call-enabled segments through
+the exact gates each live profile uses (indicator unanimity, ATR-expected move, entry window, pre-move
+timing, and where the profile asks, EMA 50 / extreme RSI / measured capture). At each 5m bar only bars
+up to that bar decide the call, so the list is not a log of past advice and cannot peek ahead.
+
+Outcomes are session-bounded: the window closes at 15:25 IST on the entry day. Each call shows entry,
+stop (with its distance in points), T1/T2/T3 with point targets, R:R to T1, the result, how long it
+took, and the maximum favourable excursion. The summary gives calls, T1 hits, stop hits, **timeouts**,
+still-open calls, win rate over **all calls**, win rate over resolved calls, average R, minimum move
+reached, and average time to T1/stop. A TIMEOUT hit neither level by 15:25 and is closed at the last
+price — it is not a win. A call still inside its window while the session is live is marked **OPEN**
+with elapsed minutes. Segments whose feed failed, have too little history, or whose six-month audit is
+below 75% are listed with the reason and contribute no calls.
+
+The panel is a replay of real candles, refreshed on each open — the six-month measurement that gates
+each profile lives in the Proof panel, not in a single session.
+
+## Next-day model — buy today's close, sell tomorrow's close
+
+The **Next-day** button opens a separate long-only overnight book. It is additive: the intraday engine,
+profiles, 75% gate and every other panel are unchanged.
+
+Rule (daily bars only):
+
+- **Signal:** at a session close, RSI(14) ≤ 38 **and** the 3-day return ≤ −1%.
+- **Entry:** that close. **Exit:** the next trading session's close.
+- **Grade A:** RSI ≤ 30 and 3-day return ≤ −2%; everything else is Grade B.
+- **Long only.** Overbought closes showed no stable next-day short edge in the same test.
+- **No stop or target is audited.** The 0.5 × ATR target and next-day ATR range are context only; the
+  measured result is close-to-close, so an overnight gap can exceed any risk guide.
+
+Measured over ~3 years of real daily bars (`overnight.py`, reproduced independently by `verify.py`):
+
+- 366 signals on 128 distinct oversold days; next close higher **62.6%** (date-level **64.8%**)
+- average **+50.9 points (+0.171%)** per call before costs; profit factor **1.29**
+- older two-thirds 59.4%, newest third 68.9%; Grade A 69.5% (59 signals), Grade B 61.2% (307)
+- 21 of 25 months positive; worst close-to-close loss −2,775.6 pts (Next 50)
+- per segment: Sensex 61.0% (59), Nifty 56.5% (62), Bank Nifty 66.0% (50), Fin Nifty 66.7% (54),
+  Midcap Select 62.1% (66), Next 50 64.0% (75)
+
+A segment only receives a call when its own audit has at least **30 signals** and a next-close
+direction rate of at least **55%**. Otherwise the panel shows **BLOCKED** (rule triggered, edge below
+the floor) or **NO SETUP**. Signals cluster on the same weak days, so several segment rows from one day
+are one market bet, not independent trades. The rates are in-sample and gross of brokerage, taxes and
+slippage; with +0.17% gross expectancy, costs are material.
+
+Daily bars come from Upstox (~3 years). Until Upstox publishes today's EOD bar, today's daily bar is
+aggregated from the real Upstox 5m series and labelled `UPSTOX 5m->1D`; Yahoo daily is a labelled
+fallback where a symbol exists. **Download signals CSV** exports the audited ledger.
+
 ## API
 
 - `GET /api/market?force=1` — full payload: feed status, per-instrument candles, options, signal, forecast
-- `GET /api/research?segments=ID1,ID2` — scan report (omit `segments` for all 16)
-- `GET /api/proof` — provenance + walk-forward audit behind the Proof panel
+- `GET /api/research?segments=ID1,ID2` — scan report (omit `segments` for all six call-enabled)
+- `GET /api/proof` — provenance + per-segment walk-forward audits behind the Proof panel
+- `GET /api/today` — today's calls replayed through the live gates, with session and per-segment stats
+- `GET /api/overnight` — next-day model audit, live signals and plans; `?format=csv&days=365` returns
+  the full audited signal ledger as CSV
 
 ## Signal engine (what is actually used)
 
@@ -180,19 +324,26 @@ them:
 
 ## Honest note on accuracy
 
-The 75%+ figure is a **wide-stop** base rate measured over six months, not a free lunch: R:R at T1
-is ≈0.29 and the break-even hit rate is ≈77%, so expectancy is roughly flat before costs. A single
-month can measure 59–62%. The desk's edge is that it refuses to call when the audit or the indicators
-do not clear the gate; it never forces a prediction. Treat the output as structured research plus risk
+The 77–80% T1-before-stop figures are **wide-stop** base rates measured in-sample over six months, not
+a free lunch: R:R at T1 is 0.25–0.4, so break-even is roughly 71–80% before costs. Bank Nifty and
+Next 50 are near zero expectancy even at ~79% hits; Fin Nifty and Nifty show a small positive average
+R. A single month can be weak (Fin Nifty's worst measured 61.9%). The desk's edge is that it refuses
+to call when the audit, sample size or the indicators do not clear the gate; it never forces a
+prediction and never uses a lower-hit-rate fallback. Treat the output as structured research plus risk
 discipline. Derivatives carry substantial risk.
+
+The next-day book is a different model and is not held to the intraday 75% standard: it is a ~62.6%
+direction rate, has no audited stop, and its signals cluster by date. It is long-only, in-sample, and
+gross of costs — a weak close followed by a large gap down is the risk it does not hedge.
 
 ## Files
 
-- `server.py` — HTTP server, Upstox orchestration, caching, market payload + research report + proof
+- `server.py` — HTTP server, Upstox orchestration, caching, market payload + research report + proof + today's replay
 - `verify.py` — independent provenance/accuracy checker (separate Upstox + Yahoo pulls)
 - `upstox.py` — Upstox v2/v3 client (quotes, candles, option contracts, chain → OI/Greeks)
 - `upstox_login.py` — OAuth code exchange, rewrites the token in `.env`
-- `analysis.py` — indicators, option analytics, composite signal, move forecast, walk-forward audits
+- `analysis.py` — indicators, option analytics, composite signal, move forecast, walk-forward audits, session replay
+- `overnight.py` — next-day oversold model: signal, no-lookahead ledger, audit and live plan
 - `research_opt.py` — offline six-month profile search (stop width × horizon × filters, monthly folds)
 - `data_sources.py` — real Yahoo chart fallback
 - `public/` — dashboard (vanilla JS, canvas charts, no CDN)
