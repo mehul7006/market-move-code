@@ -1,0 +1,9 @@
+{
+  "name": "market-signal-desk",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Sensex / Nifty / segment signal desk. Real data via Yahoo chart API; NSE option chain best-effort; demo fallback.",
+  "scripts": {
+    "start": "python server.py"
+  }
+}

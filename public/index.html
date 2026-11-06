@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Market Signal Desk — Sensex · Nifty · Segments (live)</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">▲</div>
+    <div>
+      <h1>Market Signal Desk</h1>
+      <p>Sensex · Nifty · segment research — live Upstox data · pre-move point forecasts · entries, SL, targets, OI &amp; Greeks</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="feed-pill" id="feedPill"><span class="dot"></span><span id="feedPillText">UPSTOX —</span></div>
+    <div class="mkt-status" id="mktStatus"><span class="dot"></span><span id="mktStatusText">—</span></div>
+    <div class="clock" id="clock">--:--:-- IST</div>
+    <label class="switch">
+      <input type="checkbox" id="autoToggle" checked>
+      <span class="track"><span class="thumb"></span></span>
+      <span class="switch-label">Live · 5s</span>
+    </label>
+    <button class="btn btn-accent" id="researchBtn">Research</button>
+    <button class="btn" id="proofBtn">Proof</button>
+    <button class="btn" id="refreshBtn">Refresh</button>
+  </div>
+</header>
+
+<div class="notes" id="feedNotes"></div>
+
+<nav class="tabs" id="primeTabs"></nav>
+
+<main class="grid-main">
+  <section class="card chart-card">
+    <div class="card-head">
+      <div>
+        <h2 id="chartTitle">—</h2>
+        <div class="spot-row">
+          <span class="spot" id="chartSpot">—</span>
+          <span class="chg" id="chartChg">—</span>
+          <span class="chip" id="srcCandles">—</span>
+          <span class="chip chip-tf" id="tfChip">—</span>
+        </div>
+      </div>
+      <div class="legend">
+        <span class="lg lg-entry">Entry</span><span class="lg lg-sl">SL</span>
+        <span class="lg lg-t1">T1</span><span class="lg lg-t2">T2</span>
+      </div>
+    </div>
+    <canvas id="priceChart"></canvas>
+    <div class="chart-foot" id="chartFoot"></div>
+  </section>
+
+  <aside class="card signal-card" id="signalCard"></aside>
+</main>
+
+<main class="grid-lower">
+  <section class="card board-card">
+    <div class="card-head"><h3>Strategy board — every vote shown with its raw inputs</h3></div>
+    <div class="table-wrap"><table class="board" id="strategyBoard"></table></div>
+  </section>
+
+  <section class="card options-card">
+    <div class="card-head">
+      <h3>Option / OI analytics <span class="live-dot" title="live chain"></span></h3>
+      <span class="chip" id="srcOptions">—</span>
+    </div>
+    <div id="optionsPanel"></div>
+  </section>
+</main>
+
+<section class="segments">
+  <div class="segments-head">
+    <h3>Segments — click any card for its individual signal</h3>
+  </div>
+  <div class="rail" id="sectorRail"></div>
+</section>
+
+<footer class="disclaimer">
+  <strong>Educational research tool — not investment advice.</strong>
+  Every number on this desk comes from the live Upstox feed (or Yahoo real candles as a labelled fallback)
+  — there is no mock mode. If a feed fails you will see a red error, never invented data. The generic
+  signal's walk-forward hit-rate is typically 50–62%. The 75% precision profile on Nifty/Sensex is a
+  wide-stop base rate (stop 3.4× the target, R:R ≈0.29, break-even ≈77%) measured over six months —
+  a higher hit rate, not a free lunch. Derivatives carry substantial risk of loss.
+</footer>
+
+<div class="modal-backdrop hidden" id="researchModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h2>Research scanner</h2>
+        <p class="modal-sub">Choose which segments to scan — the engine researches each on live data and
+          ranks final predictions by conviction.</p>
+      </div>
+      <button class="modal-close" id="researchClose" aria-label="Close">✕</button>
+    </div>
+    <div id="researchBody"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="proofModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h2>Proof — real data &amp; measured accuracy</h2>
+        <p class="modal-sub">Where every number comes from, and a no-lookahead walk-forward audit of the
+          exact forecast profiles in use. Re-run the independent check any time with <b>python verify.py</b>.</p>
+      </div>
+      <button class="modal-close" id="proofClose" aria-label="Close">✕</button>
+    </div>
+    <div id="proofBody"></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

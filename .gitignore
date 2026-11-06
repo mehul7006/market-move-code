@@ -1,0 +1,8 @@
+.env
+__pycache__/
+server.log
+api.json
+.candle_cache/
+proof-ui-*.png
+.research/
+proof.json
