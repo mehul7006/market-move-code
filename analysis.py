@@ -654,6 +654,8 @@ def validate_forecast(candles, min_move, params=None, lookback=1000, since_ts=No
     t2wins = t3wins = 0
     risk_sum = pnl_sum = 0.0
     bars_to_t1, examples, months = [], [], {}
+    pre6s, pre20s = [], []
+    covered_target = 0
     last_exit, cooldown = -10 ** 9, p.get("cooldown") or 0
     last_day = None
     for i in range(start, n - horizon):
@@ -709,6 +711,11 @@ def validate_forecast(candles, min_move, params=None, lookback=1000, since_ts=No
             if cap is None or cap < p["minCapture"]:
                 continue
         entry = closes[i]
+        pre6 = (entry - closes[i - 6]) * sign / entry * 100
+        pre20 = (entry - closes[i - 20]) * sign / entry * 100
+        pre6s.append(pre6)
+        pre20s.append(pre20)
+        covered_target += 1 if pre20 / 100 * entry >= min_move else 0
         stop_dist = min_move * p["stopMoveMult"] if p.get("stopMoveMult") else p["stopAtr"] * atr
         stop = entry - sign * stop_dist
         t1 = entry + sign * min_move
@@ -784,6 +791,7 @@ def validate_forecast(candles, min_move, params=None, lookback=1000, since_ts=No
             "r": round(pnl / stop_dist, 2) if stop_dist else None,
             "mfe": _r(mfe, 1),
             "atr": _r(atr, 1),
+            "preRun6": round(pre6, 3), "preRun20": round(pre20, 3),
         })
         if examples_limit:
             examples = examples[-examples_limit:]
@@ -823,6 +831,15 @@ def validate_forecast(candles, min_move, params=None, lookback=1000, since_ts=No
         "expectancyPts": round(pnl_sum / samples, 1) if samples else None,
         "avgBarsToT1": round(sum(bars_to_t1) / len(bars_to_t1), 1) if bars_to_t1 else None,
         "lowSample": samples < 15,
+        # Was the call made before the move? The median run already booked in the call's
+        # direction over the 20 bars before entry, in % of price, and how often that run-up
+        # alone had already covered the target.
+        "timing": {
+            "preRun6Pct": round(sorted(pre6s)[len(pre6s) // 2], 3),
+            "preRun20Pct": round(sorted(pre20s)[len(pre20s) // 2], 3),
+            "coveredTargetPct": round(covered_target / samples * 100, 1),
+            "minMovePct": round(min_move / (sum(closes[start:]) / max(1, n - start)) * 100, 2),
+        },
         "months": month_rates,
         "worstMonth": (min(solid) if solid else min(m["winRate"] for m in month_rates)),
         "examples": examples,

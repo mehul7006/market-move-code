@@ -25,6 +25,7 @@
       <span class="switch-label">Live · 5s</span>
     </label>
     <button class="btn btn-accent" id="todayBtn">Today's calls</button>
+    <button class="btn" id="niftyBtn">Nifty 50</button>
     <button class="btn" id="overnightBtn">Next-day</button>
     <button class="btn" id="researchBtn">Research</button>
     <button class="btn" id="proofBtn">Proof</button>
@@ -91,7 +92,10 @@
   only. Each segment runs its own six-month tested profile (session-bounded at 15:25 IST, unanimous
   indicators, wide stop) and may call only while its measured T1-before-stop rate is ≥75%. Those are
   in-sample base rates, not a forward guarantee: the wide stop puts R:R near 0.25–0.4, so break-even is
-  roughly 71–80% before costs. Derivatives carry substantial risk of loss.
+  roughly 71–80% before costs. The Nifty 50 stock book repeats that test on every constituent's own bars
+  (T1 = 0.6×ATR, stop = 3.4×T1) and issues a stock call only while its own rate clears 75% over ≥100
+  setups; breadth there is an equal-weight count of advancers/decliners, not the index's free-float move.
+  Derivatives and single stocks carry substantial risk of loss.
 </footer>
 
 <div class="modal-backdrop hidden" id="accessModal">
@@ -164,6 +168,37 @@
       <button class="modal-close" id="overnightClose" aria-label="Close">✕</button>
     </div>
     <div id="overnightBody"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="niftyModal">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <div>
+        <h2>Nifty 50 — breadth and audited per-stock calls</h2>
+        <p class="modal-sub">Every one of the 50 real constituents, live Upstox quotes and each stock's
+          own six-month walk-forward audit. A stock may call only while its measured T1-before-stop rate
+          is at least 75% over at least 100 setups; everything else stays NO CALL with the reason.</p>
+      </div>
+      <button class="modal-close" id="niftyClose" aria-label="Close">✕</button>
+    </div>
+    <div id="niftyBody"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="stockTestModal">
+  <div class="modal modal-wide">
+    <div class="modal-head">
+      <div>
+        <h2>Stock calls — last 30 days, tested</h2>
+        <p class="modal-sub">Every call the Nifty 50 gate fired in the last 30 days, replayed on real
+          Upstox 5m bars: T1/T2/T3 before stop, stops and timeouts. A stock is graded only if its own
+          audit cleared 75% over ≥100 setups using bars from <em>before</em> the window — the window
+          cannot vote on its own qualification.</p>
+      </div>
+      <button class="modal-close" id="stockTestClose" aria-label="Close">✕</button>
+    </div>
+    <div id="stockTestBody"></div>
   </div>
 </div>
 

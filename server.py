@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import analysis
 import data_sources as yahoo
 import desk_env
+import nifty50
 import overnight
 import upstox
 
@@ -34,6 +35,10 @@ ENV = upstox.load_env(os.path.join(ROOT, ".env"))
 TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN") or ENV.get("UPSTOX_ACCESS_TOKEN", "")
 UX = upstox.UpstoxClient(TOKEN)
 _token_lock = threading.Lock()
+
+# Nifty 50 stock book: additive to the six index segments. Quotes and breadth answer every
+# request; the per-stock six-month audits run in a rate-limited background worker.
+NIFTY50 = nifty50.Desk(UX, ROOT)
 
 INSTRUMENTS = [
     {"id": "SENSEX", "name": "BSE Sensex", "group": "prime", "key": "BSE_INDEX|SENSEX",
@@ -446,9 +451,11 @@ def _history(inst, days=30):
             pass
         rows = {}
         today = datetime.date.today()
-        for k in range((days + 29) // 30):
-            end = today - datetime.timedelta(days=30 * k + 1)
-            start = end - datetime.timedelta(days=29)
+        # One 5m response is capped at 1500 bars, so a 30-day chunk silently drops the
+        # newest session. 20-day chunks (~1050 bars) always reach the last completed day.
+        for k in range((days + 19) // 20):
+            end = today - datetime.timedelta(days=20 * k + 1)
+            start = end - datetime.timedelta(days=19)
             try:
                 part = UX.candles(inst["key"], "minutes", 5, end.isoformat(), start.isoformat())
             except Exception:
@@ -1518,6 +1525,37 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
+
+        if parsed.path == "/api/nifty50":
+            try:
+                rep = NIFTY50.snapshot("1" in qs.get("force", []))
+                if qs.get("format", ["json"])[0] == "csv":
+                    self._send(200, NIFTY50.csv(rep).encode("utf-8"),
+                               "text/csv; charset=utf-8",
+                               {"Content-Disposition":
+                                'attachment; filename="nifty50-breadth-calls.csv"'})
+                else:
+                    self._send(200, json.dumps(rep).encode("utf-8"),
+                               "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+            return
+
+        if parsed.path == "/api/stocktest":
+            try:
+                days = max(1, min(90, int(qs.get("days", ["30"])[0])))
+                if qs.get("format", ["json"])[0] == "csv":
+                    self._send(200, NIFTY50.month_csv(days).encode("utf-8"),
+                               "text/csv; charset=utf-8",
+                               {"Content-Disposition":
+                                f'attachment; filename="nifty50-last{days}d-calls.csv"'})
+                else:
+                    self._send(200, json.dumps(NIFTY50.month_report(days)).encode("utf-8"),
+                               "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+            return
+
 
         if parsed.path == "/api/calls":
             try:

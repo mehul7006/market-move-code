@@ -24,6 +24,7 @@ import time
 import analysis
 import data_sources as yahoo
 import desk_env
+import nifty50
 import overnight
 import server
 import upstox
@@ -134,6 +135,76 @@ def merge_today(daily, agg):
     return bars
 
 
+CHUNK_DAYS = 20  # Upstox caps one 5m response at 1500 bars; 30-day chunks drop the newest session
+
+
+def ux_history(ux, key, days):
+    """Independent 5m history in chunks small enough that Upstox never truncates a session."""
+    rows = {}
+    today = datetime.date.today()
+    for k in range((days + CHUNK_DAYS - 1) // CHUNK_DAYS):
+        end = today - datetime.timedelta(days=CHUNK_DAYS * k + 1)
+        start = end - datetime.timedelta(days=CHUNK_DAYS - 1)
+        try:
+            for c in ux.candles(key, "minutes", 5, end.isoformat(), start.isoformat()):
+                rows[c["t"]] = c
+        except Exception:
+            break
+    return [rows[t] for t in sorted(rows)]
+
+
+def pull_stock_bars(ux, key, days):
+    """Independent 5m pull for one Nifty 50 constituent, plus today's intraday bars."""
+    rows = {c["t"]: c for c in ux_history(ux, key, days)}
+    try:
+        for c in ux.intraday(key, "minutes", 5):
+            rows[c["t"]] = c
+    except Exception:
+        pass
+    return [rows[t] for t in sorted(rows)]
+
+
+def replay_call(bars, t, horizon=36):
+    """Re-derive one listed call's outcome from raw bars, independent of nifty50.stock_audit.
+
+    Same conservative rules the desk documents: a candle that touches the stop never
+    upgrades a target in that candle, targets only count before the first stop, the
+    session ends at the last bar of the entry day, and a timeout is not a win.
+    """
+    idx = next((k for k, b in enumerate(bars) if b["t"] == t["barTime"]), None)
+    if idx is None:
+        return None
+    sign = 1 if t["direction"] == "BULLISH" else -1
+    entry, stop, t1, t2, t3 = t["entry"], t["stop"], t["t1"], t["t2"], t["t3"]
+    day = (bars[idx]["t"] + 19800) // 86400
+    stop_bar = t1_bar = t2_bar = t3_bar = None
+    k = 0
+    j = idx + 1
+    while j < len(bars) and k < horizon and (bars[j]["t"] + 19800) // 86400 == day:
+        c = bars[j]
+        k += 1
+        hit_sl = (c["low"] <= stop) if sign > 0 else (c["high"] >= stop)
+        if hit_sl:
+            stop_bar = stop_bar or k
+            j += 1
+            continue
+        if stop_bar is not None:
+            j += 1
+            continue
+        if t1_bar is None and (c["high"] >= t1 if sign > 0 else c["low"] <= t1):
+            t1_bar = k
+        if t2_bar is None and (c["high"] >= t2 if sign > 0 else c["low"] <= t2):
+            t2_bar = k
+        if t3_bar is None and (c["high"] >= t3 if sign > 0 else c["low"] <= t3):
+            t3_bar = k
+        j += 1
+    outcome = "t1" if t1_bar is not None else "stop" if stop_bar is not None else "timeout"
+    bars_used = t1_bar if outcome == "t1" else stop_bar if outcome == "stop" else k
+    hits = (3 if t3_bar is not None else 2 if t2_bar is not None
+            else 1 if t1_bar is not None else 0)
+    return {"outcome": outcome, "minutes": bars_used * 5, "targetsHit": hits}
+
+
 class Checks:
     def __init__(self):
         self.rows = []
@@ -157,6 +228,7 @@ def main():
         call_list = fetch_json(args.url + "/api/calls?days=30")
         call_list_t2 = fetch_json(args.url + "/api/calls?days=30&filter=t2")
         onight = fetch_json(args.url + "/api/overnight")
+        nifty = fetch_json(args.url + "/api/nifty50")
     except Exception as exc:
         print(f"Cannot reach the dashboard at {args.url} ({exc}).\nStart it first:  python server.py")
         return 2
@@ -202,8 +274,7 @@ def main():
         # 2) candle provenance: Upstox history independently, bar by bar
         ux_hist = {}
         try:
-            ux_hist = {c["t"]: c for c in ux.candles(inst["key"], "minutes", 5,
-                                                    today.isoformat(), (today - datetime.timedelta(days=30)).isoformat())}
+            ux_hist = {c["t"]: c for c in ux_history(ux, inst["key"], 30)}
             common = [c for c in it["candles"] if c["t"] in ux_hist]
             bad = [c for c in common if pct_diff(c["close"], ux_hist[c["t"]]["close"]) > TOL_PCT]
             checks.add(bool(common) and not bad,
@@ -427,6 +498,291 @@ def main():
                f"HTTP {code} · {max(0, len(csv_lines) - 1)} rows · "
                f"header {'ok' if header_ok else 'bad'}")
 
+    # Nifty 50 stock book: NSE's own constituent list, breadth arithmetic on the served
+    # quotes, and real per-stock audits recomputed from independently pulled 5m bars. The
+    # 75% / 100-setup gate must be enforced, and the calls must stay causal.
+    print("\nNIFTY 50 STOCK BOOK — constituents, breadth and per-stock audits")
+    stocks = nifty.get("stocks") or []
+    rows_by_sym = {s["symbol"]: s for s in stocks}
+    try:
+        live_const = nifty50._fetch_constituents()
+        keys = {c["symbol"]: c["key"] for c in live_const}
+        checks.add(len(live_const) == 50 and set(keys) == set(rows_by_sym),
+                   "Nifty 50 universe is NSE's live constituent list",
+                   f"{len(live_const)} symbols · served {len(stocks)} · "
+                   f"source {nifty.get('universe', {}).get('source')}")
+    except Exception as exc:
+        keys = {}
+        checks.add(False, "Nifty 50 constituent CSV could not be re-pulled", str(exc)[:200])
+
+    bserve = nifty.get("breadth") or {}
+    pcts = [s["pct"] for s in stocks if s.get("pct") is not None]
+    adv = sum(1 for p in pcts if p > 0.02)
+    dec = sum(1 for p in pcts if p < -0.02)
+    flat = len(pcts) - adv - dec
+    avg = round(sum(pcts) / len(pcts), 2) if pcts else None
+    checks.add(bserve.get("advancers") == adv and bserve.get("decliners") == dec
+               and bserve.get("flat") == flat
+               and (avg is None or abs((bserve.get("avgPct") or 0) - avg) <= 0.01),
+               "breadth is the arithmetic of the 50 quotes",
+               f"{adv} up / {flat} flat / {dec} down · equal-weight {avg}% vs served "
+               f"{bserve.get('avgPct')}% · Nifty {bserve.get('niftyPct')}%")
+
+    calls_n5 = [s for s in stocks if s.get("status") == "CALL"]
+    blocked_n5 = [s for s in stocks if s.get("status") == "BLOCKED"]
+    qualified_n5 = [s for s in stocks if (s.get("audit") or {}).get("qualified")]
+    bad = [s["symbol"] for s in stocks
+           if (s["status"] == "CALL" and not (
+                   (s.get("audit") or {}).get("qualified")
+                   and ((s.get("audit") or {}).get("samples") or 0) >= nifty50.PROFILE["minSamples"]
+                   and ((s.get("audit") or {}).get("avgR") or -1) > nifty50.PROFILE["minAvgR"]
+                   and (s.get("plan") or {}).get("entry")))
+           or (s["status"] == "BLOCKED" and (s.get("audit") or {}).get("qualified"))
+           or (s["status"] == "NO CALL" and not (s.get("audit") or {}).get("qualified"))]
+    checks.add(not bad, f"every stock obeys the {nifty50.PROFILE['minWinRate']:.0f}% / "
+                        f"{nifty50.PROFILE['minSamples']}-setup + positive-expectancy gate",
+               f"{len(calls_n5)} calls · {len(qualified_n5)} clear the gate · "
+               f"{len(blocked_n5)} below it" + (f" · violations {bad[:5]}" if bad else ""))
+
+    samples = [s for s in ("RELIANCE", "HDFCBANK", "TCS") if s in rows_by_sym and keys.get(s)]
+    diffs, parts = [], []
+    if samples:
+        try:
+            q = ux.quotes([keys[s] for s in samples])
+            for sym in samples:
+                served_px = rows_by_sym[sym].get("price")
+                indep = (q.get(keys[sym]) or {}).get("last")
+                parts.append(f"{sym} {served_px} vs {indep}")
+                if served_px and indep:
+                    diffs.append(abs(served_px - indep) / indep * 100)
+        except Exception as exc:
+            parts.append(f"quote pull failed: {exc}")
+    checks.add(bool(diffs) and max(diffs) < TOL_PCT,
+               "stock quotes match an independent Upstox pull", " · ".join(parts))
+
+    audited = [s for s in samples if (rows_by_sym[s].get("audit") or {}).get("samples")]
+    waited = 0
+    while not audited and waited < 300:
+        print(f"        waiting {waited}s for the background stock audit…", flush=True)
+        time.sleep(15)
+        waited += 15
+        nifty = fetch_json(args.url + "/api/nifty50")
+        rows_by_sym = {s["symbol"]: s for s in nifty.get("stocks") or []}
+        audited = [s for s in samples if (rows_by_sym[s].get("audit") or {}).get("samples")]
+    local_audits = {}
+    for sym in audited[:2]:
+        served = rows_by_sym[sym]
+        sa = served.get("audit") or {}
+        try:
+            bars = pull_stock_bars(ux, keys[sym], nifty50.PROFILE["auditDays"])
+        except Exception as exc:
+            checks.add(False, f"{sym} independent 5m pull failed", str(exc)[:200])
+            continue
+        local = nifty50.stock_audit(bars, include_trades=True)
+        if not local or not local.get("samples"):
+            checks.add(False, f"{sym} stock audit could not be recomputed", f"{len(bars)} bars")
+            continue
+        local_audits[sym] = (local, bars)
+        checks.add(abs(local["samples"] - (sa.get("samples") or 0)) <= 3
+                   and abs((local["winRate"] or 0) - (sa.get("winRate") or 0)) <= 1.0,
+                   f"{sym} per-stock audit reproduces from independent 5m bars",
+                   f"setups {local['samples']} vs {sa.get('samples')} · "
+                   f"win {local['winRate']}% vs {sa.get('winRate')}% · "
+                   f"worst month {local['worstMonth']}% · avg R {local['avgR']} · "
+                   f"T2 {local['t2Rate']}% / T3 {local['t3Rate']}%")
+
+        trunc = nifty50.stock_audit(bars[:-1], include_trades=True) or {}
+        cut = bars[-1]["t"] - nifty50.PROFILE["horizon"] * 300
+        full_set = {(t["barTime"], t["direction"], t["entry"])
+                    for t in (local.get("trades") or []) if t["barTime"] <= cut}
+        trunc_set = {(t["barTime"], t["direction"], t["entry"])
+                     for t in (trunc.get("trades") or []) if t["barTime"] <= cut}
+        checks.add(full_set == trunc_set,
+                   f"{sym} stock calls are causal (truncating the newest bar changes nothing earlier)",
+                   f"{len(full_set)} earlier setups stable · "
+                   + ("no look-ahead" if full_set == trunc_set else "changed"))
+
+        live = nifty50.live_call(bars, local)
+        same_status = served.get("status") == live.get("status")
+        if served.get("status") == "CALL" and live.get("status") == "CALL":
+            same_status = same_status and abs(((served.get("plan") or {}).get("entry") or 0)
+                                              - ((live.get("plan") or {}).get("entry") or 0)) <= 0.02
+        checks.add(same_status, f"{sym} live status matches the independent gate",
+                   f"served {served.get('status')} vs independent {live.get('status')} · "
+                   f"bar {served.get('barLabel')} · audit {local['winRate']}% / {local['samples']}")
+
+    code, csv_body = fetch_raw(args.url + "/api/nifty50?format=csv", site_headers())
+    csv_lines = csv_body.splitlines()
+    checks.add(code == 200 and bool(csv_lines)
+               and csv_lines[0].startswith("symbol,name,industry,price")
+               and len(csv_lines) == len(stocks) + 1 and "None" not in csv_body,
+               "Nifty 50 CSV downloads every constituent",
+               f"HTTP {code} · {max(0, len(csv_lines) - 1)} rows")
+
+    # Last-30-days stock test: the headline must equal the listed trades, targets must be
+    # nested, the per-stock rows must add up, and one symbol's window must reproduce from
+    # the bars pulled here. Its gate must be frozen strictly before the window starts.
+    print("\n30-DAY STOCK TEST — gate frozen before the window")
+    try:
+        test = fetch_json(args.url + "/api/stocktest?days=30")
+        tr = test.get("trades") or []
+        g = test.get("gated") or {}
+        a = test.get("all") or {}
+        rows_t = test.get("stocks") or []
+        gated_tr = [t for t in tr if t.get("gated")]
+        checks.add(g.get("calls") == len(gated_tr) and a.get("calls") == len(tr),
+                   "30-day headline counts the calls it lists",
+                   f"{len(gated_tr)} gated + {len(tr) - len(gated_tr)} below the floor = {len(tr)}")
+        resolved = all(x["t1"] + x["stop"] + x["timeout"] == x["calls"] for x in (g, a))
+        checks.add(resolved and g["t1"] >= g["t2"] >= g["t3"],
+                   "every call resolves to T1 / stop / timeout and targets are nested",
+                   f"T1 {g['t1']} ≥ T2 {g['t2']} ≥ T3 {g['t3']} · stops {g['stop']} · "
+                   f"timeouts {g['timeout']} · calls {g['calls']}")
+        per_calls = sum(r["calls"] for r in rows_t)
+        per_gated = sum(r["calls"] for r in rows_t if r.get("qualifiedAtStart"))
+        checks.add(per_calls == a["calls"] and per_gated == g["calls"]
+                   and sum(1 for r in rows_t if r.get("qualifiedAtStart")) == test.get("gatedStocks"),
+                   "per-stock rows add up to the headline",
+                   f"{per_calls} calls in rows · {per_gated} from the "
+                   f"{test.get('gatedStocks')} stocks qualified before the window")
+        checks.add(all(t["barTime"] >= test["windowStart"] for t in tr),
+                   "no listed trade precedes the 30-day window",
+                   f"window {test.get('windowLabel')} · {len(tr)} calls")
+
+        bad_wr = []
+        for r in rows_t:
+            ts = [t for t in tr if t["symbol"] == r["symbol"]]
+            want = {"calls": len(ts),
+                    "t1": sum(1 for t in ts if t["outcome"] == "t1"),
+                    "t2": sum(1 for t in ts if t["targetsHit"] >= 2),
+                    "t3": sum(1 for t in ts if t["targetsHit"] >= 3),
+                    "stop": sum(1 for t in ts if t["outcome"] == "stop"),
+                    "timeout": sum(1 for t in ts if t["outcome"] == "timeout")}
+            for k, v in want.items():
+                if r.get(k) != v:
+                    bad_wr.append(f"{r['symbol']} {k} {r.get(k)}≠{v}")
+            if ts and r.get("winRate") != round(want["t1"] / want["calls"] * 100, 1):
+                bad_wr.append(f"{r['symbol']} winRate {r.get('winRate')}≠"
+                              f"{round(want['t1'] / want['calls'] * 100, 1)}")
+        g_ok = g.get("winRate") == round(g["t1"] / g["calls"] * 100, 1)
+        a_ok = a.get("winRate") == round(a["t1"] / a["calls"] * 100, 1)
+        checks.add(not bad_wr and g_ok and a_ok,
+                   "win rate is T1-before-SL ÷ all calls, and every per-stock row reconciles",
+                   f"gated {g.get('winRate')}% = {g['t1']} / {g['calls']} · "
+                   f"all {a.get('winRate')}% = {a['t1']} / {a['calls']} · "
+                   f"{len(rows_t)} rows"
+                   + (f" · {bad_wr[:4]}" if bad_wr else ""))
+
+        if local_audits:
+            sym0 = next(iter(local_audits))
+            bars0 = local_audits[sym0][1]
+            listed = [t for t in tr if t["symbol"] == sym0]
+            diffs, replayed, rt1 = [], 0, 0
+            for t in listed:
+                r = replay_call(bars0, t)
+                if r is None:
+                    continue
+                replayed += 1
+                if r["outcome"] == "t1":
+                    rt1 += 1
+                if (r["outcome"], r["minutes"], r["targetsHit"]) != (
+                        t["outcome"], t["minutes"], t["targetsHit"]):
+                    diffs.append(f"{t['dayLabel']} {t['barLabel']} "
+                                 f"{t['outcome']}≠{r['outcome']}")
+            row0 = next((x for x in rows_t if x["symbol"] == sym0), {})
+            checks.add(bool(listed) and len(listed) - replayed <= 4 and not diffs,
+                       f"{sym0} win/loss re-derives from raw bars for every replayable call",
+                       f"{replayed}/{len(listed)} replayable (EOD publication lag) · "
+                       f"T1 {rt1} replayed vs {row0.get('t1')} served"
+                       + (f" · diffs {diffs[:3]}" if diffs else ""))
+
+        bad_levels = [t["symbol"] for t in tr
+                      if not all(t.get(k) for k in ("entry", "stop", "t1", "t2", "t3"))
+                      or (t["direction"] == "BULLISH"
+                          and not (t["stop"] < t["entry"] < t["t1"] < t["t2"] < t["t3"]))
+                      or (t["direction"] == "BEARISH"
+                          and not (t["stop"] > t["entry"] > t["t1"] > t["t2"] > t["t3"]))]
+        checks.add(not bad_levels,
+                   "every prediction carries entry, SL and ordered T1/T2/T3",
+                   f"{len(tr)} calls · all levels ordered" if not bad_levels
+                   else f"violations {bad_levels[:5]}")
+
+        # The target is supposed to come from the measured move, not from the win rate:
+        # every call's T1 must sit at the profile's % of price and every stop at its stop %.
+        tp, sp = nifty50.PROFILE["targetPct"], nifty50.PROFILE["stopPct"]
+        bad_sz = [t["symbol"] for t in tr
+                  if abs(abs(t["t1"] - t["entry"]) / t["entry"] * 100 - tp) > 0.02
+                  or abs(abs(t["entry"] - t["stop"]) / t["entry"] * 100 - sp) > 0.02]
+        sizes = sorted(abs(t["t1"] - t["entry"]) for t in tr)
+        checks.add(not bad_sz,
+                   f"every call is sized at T1 {tp}% / stop {sp}% of the entry price",
+                   f"{len(tr)} calls · T1 {sizes[0]:.2f}–{sizes[-1]:.2f} pts (median "
+                   f"{sizes[len(sizes) // 2]:.2f})" + (f" · violations {bad_sz[:5]}" if bad_sz else ""))
+
+        # The timing diagnostic must re-derive from the listed trades, and it must say
+        # plainly how often the move had already been covered before the call fired.
+        pre20 = sorted(t["preRun20"] for t in gated_tr if t.get("preRun20") is not None)
+        covered = sum(1 for t in gated_tr if t.get("preRun20") is not None
+                      and abs(t["preRun20"]) / 100 * t["entry"] >= abs(t["t1"] - t["entry"]))
+        want_cov = round(covered / len(gated_tr) * 100, 1) if gated_tr else None
+        got_cov = g.get("coveredTargetPct")
+        med_ok = bool(pre20) and g.get("medianPreRun20") == round(pre20[len(pre20) // 2], 3)
+        checks.add(bool(pre20) and med_ok and got_cov is not None
+                   and abs(got_cov - want_cov) <= 0.2,
+                   "the pre-move diagnostic re-derives from the listed calls",
+                   f"median run before entry +{g.get('medianPreRun20')}% of price · "
+                   f"prior 20 bars already covered T1 in {want_cov}% of calls "
+                   f"(served {got_cov}%)")
+        bad_hit = [t["symbol"] for t in tr if t.get("hit") != (
+            "SL" if t["outcome"] == "stop" else "TIMEOUT" if t["outcome"] == "timeout"
+            else f"T{t['targetsHit'] or 1}")]
+        checks.add(not bad_hit, "the hit column matches the resolved outcome",
+                   f"{len(tr)} calls" + (f" · violations {bad_hit[:5]}" if bad_hit else ""))
+        bad_time = [t["symbol"] for t in tr
+                    if abs(t["exitTime"] - (t["barTime"] + t["minutes"] * 60)) > 1
+                    or not t.get("durationLabel") or not t.get("exitLabel")]
+        mins = [t["minutes"] for t in gated_tr]
+        avg_ok = bool(mins) and g.get("avgMinutes") == round(sum(mins) / len(mins))
+        checks.add(not bad_time and avg_ok,
+                   "each call has a duration and exit time, and the average matches",
+                   f"avg {g.get('avgMinutes')}m · {g.get('durationT1')} to T1 · "
+                   f"{g.get('durationStop')} to SL" if not bad_time
+                   else f"violations {bad_time[:5]}")
+
+        if local_audits:
+            sym0 = next(iter(local_audits))
+            local0, bars0 = local_audits[sym0]
+            cutoff = test["windowStart"]
+            win = [t for t in local0.get("trades") or [] if t["barTime"] >= cutoff]
+            row0 = next((r for r in rows_t if r["symbol"] == sym0), {})
+            wt1 = sum(1 for t in win if t["outcome"] == "t1")
+            wsl = sum(1 for t in win if t["outcome"] == "stop")
+            checks.add(abs(len(win) - (row0.get("calls") or 0)) <= 2
+                       and abs(wt1 - (row0.get("t1") or 0)) <= 2
+                       and abs(wsl - (row0.get("stop") or 0)) <= 2,
+                       f"{sym0} 30-day calls reproduce from independent 5m bars",
+                       f"calls {len(win)} vs {row0.get('calls')} · T1 {wt1} vs "
+                       f"{row0.get('t1')} · stops {wsl} vs {row0.get('stop')}")
+            before = [b for b in bars0 if b["t"] < cutoff]
+            frozen = nifty50.stock_audit(before) if len(before) >= 160 else None
+            fq = bool(frozen and frozen.get("qualified"))
+            checks.add(fq == bool(row0.get("qualifiedAtStart")),
+                       f"{sym0} qualification is frozen before the window",
+                       f"prior {frozen.get('winRate') if frozen else None}% / "
+                       f"{frozen.get('samples') if frozen else 0} setups → "
+                       f"{'allowed' if fq else 'blocked'} · served "
+                       f"{'allowed' if row0.get('qualifiedAtStart') else 'blocked'}")
+
+        code, body = fetch_raw(args.url + "/api/stocktest?days=30&format=csv", site_headers())
+        lines = body.splitlines()
+        checks.add(code == 200 and bool(lines)
+                   and lines[0].startswith("date_ist,time_ist,exit_time_ist,duration,symbol")
+                   and len(lines) == len(tr) + 1 and "None" not in body,
+                   "30-day calls CSV lists every call with its levels, hit and duration",
+                   f"HTTP {code} · {max(0, len(lines) - 1)} rows")
+    except Exception as exc:
+        checks.add(False, "30-day stock report could not be checked", str(exc)[:200])
+
     # Every tracked segment must deploy its own measured profile, and that profile must
     # still clear 75% in this independent recomputation. If it does not, the live desk
     # must be blocking calls rather than falling back.
@@ -494,6 +850,28 @@ def main():
     print("    below 75% rather than falling back to a weaker profile.")
     print("  • Historical option chains are not available, so OI/Greeks influence only the live")
     print("    forecast; they are never claimed as backtested.")
+    print("  • The Nifty 50 stock book uses NSE's own constituent CSV and one Upstox batch quote")
+    print("    for all 50 names. Each stock's call needs its own 180-day 5m audit at ≥55% over")
+    print("    ≥100 setups AND a positive average R. T1 is 0.30% of the entry price and the stop")
+    print("    0.50% (R:R 0.60), entries stop at 14:30 IST and outcomes close at 15:25 IST. Those")
+    print("    sizes come from the measured 3-hour move (median 0.42%), not from the win rate.")
+    print("    Names below the gate stay NO CALL. A sample of stocks is re-pulled and recomputed")
+    print("    here, and truncating the newest bar must leave every earlier setup unchanged.")
+    print("  • Honest timing: the stock audit also reports how far price had already run in the")
+    print("    call's direction before entry (median ~0.61% over 20 bars) and how often that run")
+    print("    already covered T1 (~82% of calls). These are continuation calls, not fresh")
+    print("    reversals; no tested 'fresher entry' guard raised the hit rate, so the report")
+    print("    states the lateness instead of hiding it. The index segments are the same shape:")
+    print("    ~94-96% of their calls had already covered T1 in the prior 20 bars.")
+    print("  • Equal-weight Nifty 50 breadth is not the index's free-float weighted move, and a")
+    print("    single stock can gap in ways an index does not; the stock book is gross of costs.")
+    print("  • The last-30-days stock test replays the gate on real 5m bars with each stock's")
+    print("    qualification (55% + positive expectancy) frozen strictly before the window, so")
+    print("    the window cannot vote on its own admission. This check re-derives every count")
+    print("    from the listed calls, sums the per-stock rows, and recomputes one symbol's")
+    print("    30-day calls from its own bars. Every listed call for that symbol is classified")
+    print("    again by an independent resolver: T1 must be touched before the stop, a stop")
+    print("    candle never upgrades a target, and a timeout is not a win.")
     print("  • The next-day book is separate: LONG at a close when RSI(14) ≤ 38 and the 3-day")
     print("    return ≤ −1%, exit at the next session's close. Daily bars only; no stop or")
     print("    target is audited. It is long-only and refuses calls below 55% direction over")

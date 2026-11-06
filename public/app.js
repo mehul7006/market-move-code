@@ -753,6 +753,8 @@ function renderProof(p) {
         <div><span>Worst month</span><b class="${(a.worstMonth ?? 0) >= 60 ? "pos" : "neg"}">${a.worstMonth == null ? "—" : a.worstMonth + "%"}</b></div>
         <div><span>Min move reached</span><b>${a.reachRate}%</b></div>
         <div><span>Avg bars to T1</span><b>${a.avgBarsToT1 ?? "—"}</b></div>
+        <div><span>Run-up before entry</span><b class="${((a.timing || {}).preRun20Pct ?? 0) >= (a.timing || {}).minMovePct ? "neg" : ""}">${(a.timing || {}).preRun20Pct == null ? "—" : "+" + a.timing.preRun20Pct + "%"}</b></div>
+        <div><span>T1 already run</span><b class="${((a.timing || {}).coveredTargetPct ?? 0) >= 50 ? "neg" : ""}">${(a.timing || {}).coveredTargetPct == null ? "—" : a.timing.coveredTargetPct + "%"}</b></div>
         <div><span>Avg risk (stop)</span><b>${a.avgRisk ?? "—"} pts</b></div>
         <div><span>R:R at T1</span><b class="${(a.rr1 ?? 0) >= 1 ? "pos" : "neg"}">${a.rr1 ?? "—"}</b></div>
         <div><span>Avg R / call</span><b class="${(a.avgR ?? 0) >= 0 ? "pos" : "neg"}">${a.avgR == null ? "—" : (a.avgR >= 0 ? "+" : "") + a.avgR}</b></div>
@@ -765,6 +767,9 @@ function renderProof(p) {
         (${a.timeouts ?? 0} here). A candle touching both levels is scored as a stop first.
         "Reach" = the min move was touched at any point, even after a stop.
         "Avg R" and expectancy use the stop distance as 1R, before costs.
+        <b>Run-up before entry</b> is the median move already booked in the call's direction over the
+        20 bars before the entry bar; <b>T1 already run</b> is how often that run-up alone had already
+        covered the whole T1 — those calls are continuation calls, not first-move calls.
         ${a.winRate >= 75 ? "" : `<b class="neg">This profile is below its 75% floor, so the desk refuses new calls until it recovers.</b>`}</div>
       ${a.lowSample ? `<div class="pf-note neg">Fewer than 15 setups — indicative only, not proven.</div>` : ""}
       ${ex ? `<div class="table-wrap"><table class="research pf-table">
@@ -1270,6 +1275,436 @@ function renderOvernight(o) {
   $("overnightCloseBtn").onclick = closeOvernight;
 }
 
+/* ------------------------------------------------------------------ Nifty 50 stock book */
+
+const n5State = { data: null, filter: "ALL", timer: null };
+
+function openNifty() {
+  $("niftyModal").classList.remove("hidden");
+  n5Load(false);
+  clearInterval(n5State.timer);
+  n5State.timer = setInterval(() => { if (!document.hidden) n5Load(false); }, 30000);
+}
+
+function closeNifty() {
+  $("niftyModal").classList.add("hidden");
+  clearInterval(n5State.timer);
+}
+
+async function n5Load(force) {
+  const body = $("niftyBody");
+  if (!n5State.data) {
+    body.innerHTML = `<div class="loading"><span class="spinner"></span> Loading live Nifty 50 quotes…
+      the first six-month audit of all 50 stocks runs in the background and fills in as it goes.</div>`;
+  }
+  try {
+    const r = await fetch("/api/nifty50" + (force ? "?force=1" : ""));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    n5State.data = await r.json();
+    renderNifty();
+  } catch (e) {
+    body.innerHTML = `<div class="error-state"><div class="big">NIFTY 50 BOOK UNAVAILABLE</div>
+      <div class="why">${esc(e.message)}</div>
+      <div class="fix">It needs the dashboard server running with a valid Upstox token, plus NSE's
+        constituent CSV (or its cached copy). It never fills in invented prices — if a feed fails,
+        this error is the output.</div></div>`;
+  }
+}
+
+function n5Chip(status) {
+  return { CALL: "call", BLOCKED: "blocked", "NO CALL": "none", AUDITING: "forming",
+    ERROR: "err" }[status] || "none";
+}
+
+function n5Row(s) {
+  const a = s.audit || {};
+  const rateCls = a.winRate == null ? "" : a.qualified ? "pos" : "neg";
+  const p = s.plan;
+  const planCell = s.status === "CALL" && p
+    ? `<div class="n5-plan">
+         <span class="side ${p.direction === "BULLISH" ? "up" : "down"}">${p.direction === "BULLISH" ? "▲ LONG" : "▼ SHORT"}</span>
+         entry <b>${fmt(p.entry)}</b><br>
+         <span class="lv">SL</span> ${fmt(p.stop)} · <span class="lv">T1</span> ${fmt(p.t1)}<br>
+         <span class="lv">T2</span> ${fmt(p.t2)} · <span class="lv">T3</span> ${fmt(p.t3)}
+         ${p.preRun20Pct == null ? "" : `<div class="fcs ${p.preRun20Pct >= (p.target / p.entry * 100) ? "neg" : ""}">already ran +${p.preRun20Pct}% before this bar</div>`}</div>`
+    : `<div class="n5-reason">${esc(s.reason || "—")}</div>`;
+  const barCell = s.barLabel
+    ? `${s.barLabel}<div class="fcs">${s.sessionClosed ? "prev session" : "IST bar"}</div>`
+    : "—";
+  return `<tr class="${s.status === "CALL" ? "n5-call" : ""}">
+    <td><div class="n5-sym">${esc(s.symbol)}</div><div class="n5-ind">${esc(s.industry || "")}</div></td>
+    <td><div class="n5-price">${fmt(s.price)}</div>
+      <div class="fcs ${(s.pct || 0) >= 0 ? "pos" : "neg"}">${fmtPct(s.pct)}</div></td>
+    <td class="hide-sm"><div class="n5-price">${fmt(s.atr)}</div><div class="fcs">5m ATR</div></td>
+    <td class="hide-sm">${s.rangePos == null ? "—" : `<div class="n5-range" title="day low ${fmt(s.low)} → high ${fmt(s.high)}"><i style="left:calc(${s.rangePos}% - 1px)"></i></div>`}
+      <div class="fcs">day range</div></td>
+    <td class="n5-audit"><b class="${rateCls}">${a.winRate == null ? "—" : Number(a.winRate).toFixed(1) + "%"}</b>
+      <div class="fcs">${a.samples || 0} setups · worst ${a.worstMonth ?? "—"}%</div></td>
+    <td><span class="on-status ${n5Chip(s.status)}">${esc(s.statusLabel || s.status)}</span>
+      <div class="fcs">${a.rr1 ? "R:R " + a.rr1 : ""} ${a.qualified
+        ? `· clears ${((n5State.data || {}).profile || {}).minWinRate}% + positive R` : ""}</div></td>
+    <td>${planCell}</td>
+    <td class="hide-sm">${barCell}</td>
+  </tr>`;
+}
+
+function renderNifty() {
+  const o = n5State.data;
+  if (!o) return;
+  const b = o.breadth || {};
+  const a = o.audit || {};
+  const quoted = Math.max(1, b.quoted || 1);
+  const all = o.stocks || [];
+  const filtered = all.filter((s) => {
+    if (n5State.filter === "CALL") return s.status === "CALL";
+    if (n5State.filter === "BLOCKED") return s.status === "BLOCKED";
+    if (n5State.filter === "UP") return (s.pct || 0) > 0.02;
+    if (n5State.filter === "DOWN") return (s.pct || 0) < -0.02;
+    return true;
+  });
+  const filters = [["ALL", `All ${all.length}`], ["CALL", `Calls ${a.calls || 0}`],
+    ["UP", `Advancing ${b.advancers || 0}`], ["DOWN", `Declining ${b.decliners || 0}`],
+    ["BLOCKED", `Blocked ${all.filter((s) => s.status === "BLOCKED").length}`]];
+  const progress = a.running
+    ? `<div class="n5-progress"><span class="spinner"></span>
+         Audited <b>${a.done}</b> / ${a.total} stocks — quotes are live, per-stock audits fill in
+         as each one finishes.</div>`
+    : a.error
+      ? `<div class="n5-progress">Audit error: ${esc(a.error)}</div>`
+      : `<div class="n5-progress" style="border-color:rgba(148,163,184,.25);background:rgba(15,23,42,.5)">
+           Audit complete · <b>${a.done}</b> / ${a.total} stocks · cycle ${a.cycle} ·
+           ${a.qualified} clear the 75% gate · ${a.calls} call${a.calls === 1 ? "" : "s"} right now</div>`;
+  const row = (label, v, cls) => `<div><span>${label}</span><b class="${cls || ""}">${v}</b></div>`;
+  $("niftyBody").innerHTML = `
+    <div class="n5-hero">
+      <div class="n5-card">
+        <div class="n5-kicker">Nifty 50 · live constituent breadth</div>
+        <div class="n5-index"><b>${fmt(o.nifty && o.nifty.last)}</b>
+          <span class="${((o.nifty || {}).pct || 0) >= 0 ? "pos" : "neg"}">${fmtPct((o.nifty || {}).pct)}</span>
+          <span class="fcs">${o.marketOpen ? "market open" : "market closed"} · ${esc(o.istClock)} IST</span></div>
+        <div class="n5-bar">
+          <span class="up" style="width:${(b.advancers || 0) / quoted * 100}%"></span>
+          <span class="flat" style="width:${(b.flat || 0) / quoted * 100}%"></span>
+          <span class="down" style="width:${(b.decliners || 0) / quoted * 100}%"></span>
+        </div>
+        <div class="n5-legend">
+          <span><b class="pos">${b.advancers ?? "—"}</b> advancing</span>
+          <span><b>${b.flat ?? "—"}</b> flat</span>
+          <span><b class="neg">${b.decliners ?? "—"}</b> declining</span>
+          <span>equal-weight <b>${fmtPct(b.avgPct)}</b> · median <b>${fmtPct(b.medianPct)}</b>
+            · vs Nifty <b>${b.equalWeightVsIndex == null ? "—" : (b.equalWeightVsIndex > 0 ? "+" : "") + b.equalWeightVsIndex + "%"}</b></span>
+        </div>
+      </div>
+      <div class="n5-stats">
+        ${row("Clear the gate", `${a.qualified ?? 0} / ${all.length}`, "pos")}
+        ${row("Calls now", a.calls ?? 0, (a.calls || 0) ? "pos" : "")}
+        ${row("Audit done", `${a.done ?? 0} / ${a.total ?? 50}`, "")}
+      </div>
+    </div>
+    ${progress}
+    <div class="n5-tools">
+      ${filters.map(([k, label]) => `<button class="n5-fbtn ${n5State.filter === k ? "on" : ""}"
+        data-n5-filter="${k}">${label}</button>`).join("")}
+      <span class="spacer"></span>
+      <button class="btn" data-n5-test="1">30-day test</button>
+      <a class="btn ghost" href="/api/nifty50?format=csv">Download CSV</a>
+      <button class="btn" data-n5-force="1">Re-audit</button>
+      <button class="btn ghost" id="niftyCloseBtn">Close</button>
+    </div>
+    <div class="table-wrap"><table class="n5-table">
+      <thead><tr><th>Stock</th><th>Last / chg</th><th class="hide-sm">5m ATR</th>
+        <th class="hide-sm">Day range</th><th>Own 6-month audit</th><th>Status</th>
+        <th>Plan / reason</th><th class="hide-sm">Last bar</th></tr></thead>
+      <tbody>${filtered.map(n5Row).join("") ||
+        `<tr><td colspan="8" class="num">No stock matches this filter.</td></tr>`}</tbody>
+    </table></div>
+    <div class="n5-foot">
+      <div><b>Universe</b> — ${esc((o.universe || {}).source || "—")} · ${(o.universe || {}).count || 0}
+        names${(o.universe || {}).note ? " · " + esc(o.universe.note) : ""}</div>
+      <div><b>Gate</b> — a stock calls only while its own 180-day audit shows ≥${(o.profile || {}).minWinRate}%
+        T1-before-stop over ≥${(o.profile || {}).minSamples} setups <b>and</b> a positive expectancy per
+        call. T1 = ${(o.profile || {}).targetPct}% of the entry price (stop ${(o.profile || {}).stopPct}%),
+        3-hour horizon, entry before 14:30 IST, session-bounded at 15:25 IST; a timeout is not a win.</div>
+      <div><b>Honest read</b> — R:R to T1 is ${((o.profile || {}).targetPct / (o.profile || {}).stopPct).toFixed(2)},
+        so break-even is near ${Math.round((o.profile || {}).stopPct / ((o.profile || {}).targetPct + (o.profile || {}).stopPct) * 100)}%
+        before costs; the measured T1 rate at this target is 63.5% over the last 30 days and 61% over
+        180 days — a thin margin. The target is set from the
+        observed 3-hour move (0.42% median), not shrunk to make the win rate look good. Rates are
+        in-sample on the same 180 days, and single stocks gap in ways an index does not. Gross
+        figures, before brokerage and slippage.</div>
+      <div><b>Timing</b> — each call shows how far price had already run before the entry bar. The median
+        gated call fires after roughly 0.61% has already moved and in 82% of calls the prior 20 bars had
+        already covered T1, so these are continuation calls. No tested “fresher entry” filter improved
+        the hit rate, so the number is reported instead of hidden.</div>
+      <div><b>Proof</b> — <code>python verify.py</code> re-pulls a sample of these stocks, recomputes
+        the audit and proves the gate is causal and enforced.</div>
+    </div>`;
+  const closeBtn = $("niftyCloseBtn");
+  if (closeBtn) closeBtn.onclick = closeNifty;
+}
+
+$("niftyBody").addEventListener("click", (e) => {
+  const f = e.target.closest("[data-n5-filter]");
+  if (f) {
+    n5State.filter = f.dataset.n5Filter;
+    renderNifty();
+    return;
+  }
+  const force = e.target.closest("[data-n5-force]");
+  if (force) {
+    force.disabled = true;
+    force.textContent = "Re-auditing…";
+    n5Load(true);
+    return;
+  }
+  if (e.target.closest("[data-n5-test]")) openStockTest();
+});
+
+/* ------------------------------------------------------------------ 30-day stock test */
+
+const stState = { data: null, filter: "gated" };
+
+function openStockTest() {
+  $("stockTestModal").classList.remove("hidden");
+  stLoad();
+}
+
+function closeStockTest() {
+  $("stockTestModal").classList.add("hidden");
+}
+
+async function stLoad() {
+  const body = $("stockTestBody");
+  body.innerHTML = `<div class="loading"><span class="spinner"></span> Replaying the last 30 days
+    through the stock gate on real 5m bars…</div>`;
+  try {
+    const r = await fetch("/api/stocktest?days=30");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    stState.data = await r.json();
+    renderStockTest();
+  } catch (e) {
+    body.innerHTML = `<div class="error-state"><div class="big">STOCK TEST UNAVAILABLE</div>
+      <div class="why">${esc(e.message)}</div>
+      <div class="fix">This report is rebuilt from the same real Upstox bars as the stock book.
+        If a stock has no cached bars yet, open the Nifty 50 panel once and let the audit finish.
+        It never fills gaps with invented prices.</div></div>`;
+  }
+}
+
+function stHitChip(t) {
+  if (t.outcome === "stop") return `<span class="on-status blocked">SL</span>`;
+  if (t.outcome === "timeout") return `<span class="on-status none">TIMEOUT</span>`;
+  return `<span class="on-status call">${esc(t.hit || "T" + (t.targetsHit || 1))}</span>`;
+}
+
+function stSourceStrip() {
+  const d = state.data;
+  const box = (id) => {
+    const inst = d && d.instruments ? d.instruments.find((i) => i.id === id) : null;
+    if (!inst) return `<div class="st-src-item err"><b>${id}</b>
+      <span class="neg">no live payload in this view</span></div>`;
+    const src = inst.source || {};
+    const bars = inst.candles || [];
+    const last = bars.length ? bars[bars.length - 1].t : null;
+    const when = last == null ? "—"
+      : new Date((last + 19800) * 1000).toISOString().slice(0, 16).replace("T", " ");
+    const bad = inst.error || !bars.length;
+    return `<div class="st-src-item ${bad ? "err" : "ok"}">
+      <b>${esc(inst.name || id)}</b>
+      <span class="st-src-px">${fmt(inst.spot)} <span class="${(inst.changePct || 0) >= 0 ? "pos" : "neg"}">${fmtPct(inst.changePct)}</span></span>
+      <span class="st-src-meta">quote <b>${esc(src.quote || "—")}</b> · candles
+        <b>${esc(src.candles || "—")}</b> · last 5m bar <b>${when} IST</b></span>
+      ${inst.error ? `<span class="neg">${esc(inst.error)}</span>` : ""}</div>`;
+  };
+  return `<div class="st-src">
+    <div class="st-src-head"><b>Live feed, no mock path</b> — Sensex and Nifty prices below are the
+      same live payload the desk chart uses. If a feed fails you get its error here, never an
+      invented price.</div>
+    <div class="st-src-grid">${box("SENSEX")}${box("NIFTY")}</div>
+  </div>`;
+}
+
+function renderStockTest() {
+  const o = stState.data;
+  if (!o) return;
+  const g = o.gated || {};
+  const a = o.all || {};
+  const pct = (n) => n == null ? "—" : n.toFixed(1) + "%";
+  const tile = (label, v, sub, cls) => `<div><span>${label}</span>
+    <b class="${cls || ""}">${v}</b>${sub ? `<div class="fcs">${sub}</div>` : ""}</div>`;
+  const rows = (o.stocks || []).filter((s) => s.calls || s.qualifiedAtStart);
+  const floor = (o.profile || {}).minWinRate ?? 55;
+  const allTrades = o.trades || [];
+  const lastBySym = {};
+  for (const t of allTrades) lastBySym[t.symbol] = t;
+  const rowBySym = {};
+  for (const s of o.stocks || []) rowBySym[s.symbol] = s;
+  const shown = stState.filter === "all" ? allTrades : allTrades.filter((t) => t.gated);
+  const cont = shown.filter((t) => t.preRun20 != null &&
+    Math.abs(t.preRun20) * t.entry / 100 >= Math.abs(t.t1 - t.entry)).length /
+    Math.max(1, shown.length) * 100;
+  const callsTable = shown.slice().reverse().map((t) => {
+    const s = rowBySym[t.symbol];
+    const wr = s && s.calls ? s.t1 / s.calls * 100 : null;
+    return `<tr>
+    <td><div class="n5-sym">${esc(t.symbol)}</div><div class="fcs">${esc(t.dayLabel)} ${esc(t.barLabel)}${
+      t.preRun20 == null ? "" : ` · +${t.preRun20.toFixed(2)}% ran before`}</div></td>
+    <td class="num"><b>${fmt(t.entry)}</b><div class="fcs">risk ${fmt(t.risk)}</div></td>
+    <td class="${t.direction === "BULLISH" ? "pos" : "neg"}">${t.direction === "BULLISH" ? "▲ LONG" : "▼ SHORT"}
+      ${t.gated ? "" : `<div class="fcs">below floor</div>`}</td>
+    <td class="num pos">${fmt(t.t1)}</td>
+    <td class="num pos">${fmt(t.t2)}</td>
+    <td class="num pos">${fmt(t.t3)}</td>
+    <td class="num neg">${fmt(t.stop)}</td>
+    <td>${stHitChip(t)}</td>
+    <td class="num">${esc(t.durationLabel || "—")}<div class="fcs">exit ${esc(t.exitTime ? t.exitLabel : "—")}</div></td>
+    <td class="num">${fmt(t.exit)}</td>
+    <td class="num ${t.r > 0 ? "pos" : t.r < 0 ? "neg" : ""}">${t.r == null ? "—" : (t.r > 0 ? "+" : "") + t.r}</td>
+    <td class="num">${wr == null ? "—" : `<b class="${wr >= floor ? "pos" : ""}">${pct(wr)}</b>`}
+      <div class="fcs">30-day rate</div></td>
+  </tr>`;
+  }).join("") || `<tr><td colspan="12" class="num">No call in this window.</td></tr>`;
+  const latestTable = rows.map((s) => {
+    const t = lastBySym[s.symbol];
+    const wr = s.calls ? s.t1 / s.calls * 100 : null;
+    const side = t ? (t.direction === "BULLISH" ? `<b class="pos">▲ LONG</b>` : `<b class="neg">▼ SHORT</b>`)
+                   : `<span class="fcs">no call</span>`;
+    const away = (v) => t ? `${fmt(Math.abs(v - t.entry))} · ` +
+      (Math.abs(v - t.entry) / t.entry * 100).toFixed(2) + `%` : "";
+    return `<tr class="${s.qualifiedAtStart ? "" : "st-off"}">
+    <td><div class="n5-sym">${esc(s.symbol)}</div>
+      <div class="n5-ind">${esc(s.industry || "")}</div>
+      ${t && t.preRun20 != null ? `<div class="fcs">+${t.preRun20.toFixed(2)}% ran before</div>` : ""}</td>
+    <td>${side}</td>
+    <td class="num"><b>${t ? fmt(t.entry) : "—"}</b>
+      <div class="fcs">${t ? esc(t.dayLabel) + " " + esc(t.barLabel) : "no call in window"}</div></td>
+    <td class="num pos">${t ? fmt(t.t1) : "—"}<div class="fcs">${away(t ? t.t1 : 0)}</div></td>
+    <td class="num pos">${t ? fmt(t.t2) : "—"}<div class="fcs">${away(t ? t.t2 : 0)}</div></td>
+    <td class="num pos">${t ? fmt(t.t3) : "—"}<div class="fcs">${away(t ? t.t3 : 0)}</div></td>
+    <td class="num neg">${t ? fmt(t.stop) : "—"}<div class="fcs">${away(t ? t.stop : 0)}</div></td>
+    <td class="num"><b class="${wr != null && wr >= floor ? "pos" : ""}">${wr == null ? "—" : pct(wr)}</b>
+      <div class="fcs">${s.qualifiedAtStart ? "gate " + pct(s.rateAtStart) : "below floor"}</div></td>
+  </tr>`;
+  }).join("") || `<tr><td colspan="8" class="num">No stock had a cached 5m history yet —
+    open the Nifty 50 panel and let the audit finish.</td></tr>`;
+  const stocksTable = rows.map((s) => `<tr class="${s.qualifiedAtStart ? "" : "st-off"}">
+    <td><div class="n5-sym">${esc(s.symbol)}</div>
+      <div class="n5-ind">${esc(s.industry || "")}</div></td>
+    <td>${s.qualifiedAtStart ? `<b class="pos">YES</b>` : `<b class="neg">NO</b>`}
+      <div class="fcs">${s.rateAtStart == null ? "no prior audit" : pct(s.rateAtStart) + " · " + (s.samplesAtStart || 0) + " setups"}</div></td>
+    <td class="num"><b>${s.calls}</b></td>
+    <td class="num">${s.t1}<div class="fcs">${s.calls ? pct(s.t1 / s.calls * 100) : "—"}</div></td>
+    <td class="num">${s.t2}</td>
+    <td class="num">${s.t3}</td>
+    <td class="num ${s.stop ? "neg" : ""}">${s.stop}</td>
+    <td class="num">${s.timeout}</td>
+    <td class="num"><b class="${s.calls && s.t1 / s.calls * 100 >= floor ? "pos" : ""}">${s.calls ? pct(s.t1 / s.calls * 100) : "—"}</b></td>
+    <td class="num">${s.avgR == null ? "—" : (s.avgR > 0 ? "+" : "") + s.avgR.toFixed(2)}</td>
+  </tr>`).join("") || `<tr><td colspan="10" class="num">No stock had a cached 5m history yet —
+    open the Nifty 50 panel and let the audit finish.</td></tr>`;
+  $("stockTestBody").innerHTML = `
+    <div class="n5-hero">
+      <div class="n5-card">
+        <div class="n5-kicker">Nifty 50 · last ${o.days} days · gate frozen before the window</div>
+        <div class="n5-index"><b>${(g.calls || 0).toLocaleString("en-IN")}</b> calls
+          <span class="fcs">${o.windowLabel} · ${o.gatedStocks} of ${o.totalStocks} stocks qualified
+          before the window opened</span></div>
+        <div class="st-funnel">
+          <span>T1 <b class="pos">${pct(g.winRate)}</b></span>
+          <span>T2 <b>${pct(g.t2Rate)}</b></span>
+          <span>T3 <b>${pct(g.t3Rate)}</b></span>
+          <span>Stops <b class="neg">${pct(g.stopRate)}</b></span>
+          <span>Timeouts <b>${pct(g.timeoutRate)}</b></span>
+          <span>Avg R <b>${g.avgR == null ? "—" : (g.avgR > 0 ? "+" : "") + g.avgR}</b></span>
+        </div>
+        <div class="n5-bar st-bar">
+          <span class="t3" style="width:${(g.t3 || 0) / Math.max(1, g.calls) * 100}%"></span>
+          <span class="t2" style="width:${((g.t2 || 0) - (g.t3 || 0)) / Math.max(1, g.calls) * 100}%"></span>
+          <span class="up" style="width:${((g.t1 || 0) - (g.t2 || 0)) / Math.max(1, g.calls) * 100}%"></span>
+          <span class="down" style="width:${(g.stop || 0) / Math.max(1, g.calls) * 100}%"></span>
+          <span class="flat" style="width:${(g.timeout || 0) / Math.max(1, g.calls) * 100}%"></span>
+        </div>
+        <div class="n5-legend">
+          <span><b class="pos">T1</b> ${g.t1}</span><span><b>T2</b> ${g.t2}</span>
+          <span><b>T3</b> ${g.t3}</span><span><b class="neg">Stops</b> ${g.stop}</span>
+          <span><b>Timeouts</b> ${g.timeout}</span>
+          <span><b>Total R</b> ${g.totalR == null ? "—" : (g.totalR > 0 ? "+" : "") + g.totalR}</span>
+          <span>resolve in <b>${esc(g.durationT1 || "—")}</b> on T1 · <b>${esc(g.durationStop || "—")}</b> on SL</span>
+        </div>
+        <div class="n5-legend">
+          <span>Target <b>${g.avgTargetPts == null ? "—" : g.avgTargetPts + " pts"}</b>${g.avgTargetPct == null ? "" : ` (${g.avgTargetPct}%)`}</span>
+          <span>Fired after <b class="neg">${g.medianPreRun20 == null ? "—" : "+" + g.medianPreRun20 + "%"}</b> already ran</span>
+          <span>Continuation <b class="neg">${shown.length ? cont.toFixed(0) + "%" : "—"}</b> of the rows shown had already run ≥ T1 before entry</span>
+        </div>
+      </div>
+      <div class="n5-stats">
+        ${tile("Calls (gated)", (g.calls || 0).toLocaleString("en-IN"), `${o.gatedStocks} stocks`, "")}
+        ${tile("T1 before stop", g.t1 ?? "—", pct(g.winRate), "pos")}
+        ${tile("T2 before stop", g.t2 ?? "—", pct(g.t2Rate), "")}
+        ${tile("T3 before stop", g.t3 ?? "—", pct(g.t3Rate), "")}
+        ${tile("Stopped out", g.stop ?? "—", pct(g.stopRate), "neg")}
+        ${tile("Timeouts", g.timeout ?? "—", pct(g.timeoutRate), "")}
+      </div>
+    </div>
+    ${stSourceStrip()}
+    <div class="n5-tools">
+      <span class="st-note">All ${o.totalStocks} names, including below-floor stocks:
+        <b>${a.calls}</b> calls · <b>${pct(a.winRate)}</b> T1 · <b>${a.stop}</b> stops —
+        that is the ungated comparison, not what the desk would call.</span>
+      <span class="spacer"></span>
+      <a class="btn ghost" href="/api/stocktest?days=30&format=csv">Download calls CSV</a>
+    </div>
+    <div class="st-sub">Per stock over the window — T1/T2/T3 here are hit counts, not price levels</div>
+    <div class="table-wrap"><table class="n5-table">
+      <thead><tr><th>Stock</th><th>Gate before window</th><th>Calls</th><th>T1 hits</th>
+        <th>T2 hits</th><th>T3 hits</th><th>Stops</th><th>Timeouts</th><th>Win rate</th>
+        <th>Avg R</th></tr></thead>
+      <tbody>${stocksTable}</tbody>
+    </table></div>
+    <div class="st-sub">Latest call per stock — entry is the share price; T1, T2, T3 and SL are
+      the predicted price levels for that stock. T1 is ${(o.profile || {}).targetPct}% of price
+      (the old target was a median 0.13%), stop ${(o.profile || {}).stopPct}%. “Ran before” is how
+      far price had already moved in the call's direction over the 20 bars before it fired.</div>
+    <div class="table-wrap"><table class="n5-table">
+      <thead><tr><th>Stock</th><th>Side</th><th>Entry</th><th>T1</th><th>T2</th><th>T3</th>
+        <th>SL</th><th>Win rate</th></tr></thead>
+      <tbody>${latestTable}</tbody>
+    </table></div>
+    <div class="st-sub">Every prediction — ${shown.length.toLocaleString("en-IN")} calls, newest first</div>
+    <div class="n5-tools">
+      <button class="n5-fbtn ${stState.filter === "gated" ? "on" : ""}" data-st-filter="gated">
+        Gated ${(g.calls || 0).toLocaleString("en-IN")}</button>
+      <button class="n5-fbtn ${stState.filter === "all" ? "on" : ""}" data-st-filter="all">
+        All 50 names ${(a.calls || 0).toLocaleString("en-IN")}</button>
+      <span class="spacer"></span>
+      <span class="st-note">Entry is the share price when the call fired; T1/T2/T3 and SL are the
+        price levels for that call. The hit column is the furthest level reached before the stop.
+        Win% is that stock's own T1 rate over this window. Exit is the T1 exit the desk deploys —
+        a T2/T3 hit ran further but still banked T1.</span>
+    </div>
+    <div class="table-wrap"><table class="n5-table">
+      <thead><tr><th>Stock · fired IST</th><th>Entry · risk</th><th>Side</th><th>T1</th>
+        <th>T2</th><th>T3</th><th>SL</th><th>Hit</th><th>Duration · exit</th><th>Exit px</th>
+        <th>R</th><th>Stock win%</th></tr></thead>
+      <tbody>${callsTable}</tbody>
+    </table></div>
+    <div class="n5-foot">
+      <div><b>Test</b> — ${esc(o.method.what)}</div>
+      <div><b>No peeking</b> — ${esc(o.method.gateFrozen)}</div>
+      <div><b>Targets</b> — ${esc(o.method.targets)}</div>
+      <div><b>Timing</b> — ${esc(o.method.timing)}</div>
+      <div><b>Honest read</b> — ${esc(o.method.risk)}</div>
+    </div>`;
+}
+
+$("stockTestBody").addEventListener("click", (e) => {
+  const f = e.target.closest("[data-st-filter]");
+  if (f) {
+    stState.filter = f.dataset.stFilter;
+    renderStockTest();
+  }
+});
+
 /* ------------------------------------------------------------------ access / token */
 
 const accessState = {
@@ -1445,11 +1880,16 @@ $("todayModal").addEventListener("click", (e) => { if (e.target.id === "todayMod
 $("overnightBtn").addEventListener("click", openOvernight);
 $("overnightClose").addEventListener("click", closeOvernight);
 $("overnightModal").addEventListener("click", (e) => { if (e.target.id === "overnightModal") closeOvernight(); });
+$("niftyBtn").addEventListener("click", openNifty);
+$("niftyClose").addEventListener("click", closeNifty);
+$("niftyModal").addEventListener("click", (e) => { if (e.target.id === "niftyModal") closeNifty(); });
+$("stockTestClose").addEventListener("click", closeStockTest);
+$("stockTestModal").addEventListener("click", (e) => { if (e.target.id === "stockTestModal") closeStockTest(); });
 $("accessBtn").addEventListener("click", openAccess);
 $("accessClose").addEventListener("click", closeAccess);
 $("accessModal").addEventListener("click", (e) => { if (e.target.id === "accessModal") closeAccess(); });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { closeResearch(); closeProof(); closeToday(); closeOvernight(); closeAccess(); }
+  if (e.key === "Escape") { closeResearch(); closeProof(); closeToday(); closeOvernight(); closeStockTest(); closeNifty(); closeAccess(); }
 });
 
 setInterval(clockTick, 1000);

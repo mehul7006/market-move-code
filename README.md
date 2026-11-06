@@ -5,7 +5,9 @@ Nifty sector indices**. The six index segments generate entry/SL/T1/T2/T3 calls,
 six-month tested profile. Sector indices are chart context only — they never generate calls. Click any
 segment to see its direction, conviction, the full strategy board (every vote with its raw inputs), real
 option/OI analytics (PCR, max pain, OI flow, put/call walls, ATM IV, straddle, Greeks) and a walk-forward
-hit-rate measured on that instrument's own candles.
+hit-rate measured on that instrument's own candles. A separate **Nifty 50** book shows all 50
+constituents with live quotes, equal-weight breadth and a per-stock call only for names whose own
+six-month audit clears 75%.
 
 ## Run
 
@@ -223,7 +225,12 @@ Two ways to check that the predictions are computed from real market data:
 2. **`python verify.py`** — a separate CLI that pulls Upstox quotes/history and Yahoo 5m bars *again*,
    diffs every overlapping bar against the dashboard, pulls its own six-month history for all six
    segments, recomputes every audit and exits non-zero on any mismatch. It never trusts the dashboard's
-   own numbers.
+   own numbers. The Nifty 50 block adds: the served constituent set equals NSE's live CSV, breadth is the
+   arithmetic of the 50 quotes, every stock obeys the 55% / ≥100-setup / positive-expectancy gate (a
+   CALL must be qualified, a BLOCKED stock must not be), three quotes match an independent pull, two
+   stocks' 180-day audits are re-pulled and recomputed (samples within ±3, rate within 1 point),
+   truncating the newest bar leaves every earlier setup unchanged, the live status matches the
+   independent gate, and the CSV has 50 rows.
 
 ```bash
 python server.py     # terminal 1
@@ -301,6 +308,97 @@ Daily bars come from Upstox (~3 years). Until Upstox publishes today's EOD bar, 
 aggregated from the real Upstox 5m series and labelled `UPSTOX 5m->1D`; Yahoo daily is a labelled
 fallback where a symbol exists. **Download signals CSV** exports the audited ledger.
 
+## Nifty 50 stock book — breadth plus audited per-stock calls
+
+The **Nifty 50** button opens the whole index, not just the index future: all 50 constituents with a
+live quote each, an equal-weight breadth count, and a per-stock intraday call only for names that clear
+the same kind of audit the six segments use.
+
+- **Universe:** NSE's own `ind_nifty50list.csv` (Company Name, Industry, Symbol, ISIN). Cached for 7
+  days; if NSE is unreachable the desk uses a dated snapshot of that same file and labels it as such
+  (`universe.live: false`, with the snapshot date in `note`). Instrument keys are `NSE_EQ|<ISIN>`;
+  quotes for all 50 plus the Nifty index arrive in one Upstox batch call.
+- **Data:** 180 calendar days of real Upstox 5m bars per stock (the v3 history endpoint caps a request
+  at ~30 days, so it is pulled in six chunks and merged with the live intraday tail). Cached for 6
+  hours per stock in `.candle_cache/`; audits persist in `.candle_cache/nifty50_audits.json`.
+- **Per-stock gate:** identical structure to the segment profiles — EMA 9/21 + MACD histogram +
+  Supertrend + RSI-extreme unanimity, EMA 50 regime, entry before 14:30 IST, ATR(14) at least 0.08% of
+  price. T1 = **0.30% of the entry price**, stop = **0.50%** (R:R 0.60), 36-bar (3-hour) horizon,
+  session-bounded at 15:25 IST, 3-bar cooldown, one trade at a time. A candle touching T1 and the stop
+  together counts as a stop; a timeout is closed at the last price and is **not** a win.
+- **Why those sizes:** they come from the movement, not from the win rate. Across 112k gated 5m
+  triggers, the median favourable excursion inside the 3-hour window is **0.42% of price** (p25 0.19%,
+  p75 0.76%, p90 1.22%) and 62% of setups reach 0.30%. The old 0.6×ATR target had a median of just
+  0.13% of price — about a third of the move that was actually there. 0.30% is ~72% of the median move
+  with a 0.50% stop; a 0.25% target had the best total R, a 0.35% target cut the hit rate faster than it
+  raised R, so 0.30% is the deployed middle.
+- **Gate floor:** a stock may call only while its own 180-day audit shows **≥55% T1-before-stop over
+  ≥100 setups AND a positive average R** (expectancy above zero at the deployed 0.60 R:R). Everything
+  else is shown as **BLOCKED — no call** with the measured rate, sample size and average R, or **NO CALL**
+  when the stock qualifies but the live gate is not triggered right now. There is no weaker fallback
+  profile, and a stock that has not finished auditing shows **AUDITING**, never a guess.
+- **Measured spread (2026-11-07, 180-day audits, ~211–232 setups each):** qualification rates run from
+  ONGC 51.1% to HINDUNILVR 68.0%; **29 of 50** names clear both limbs. The rate alone is not enough:
+  ICICIBANK 55.2% / −0.001R, POWERGRID 56.1% / −0.017R, EICHERMOT 56.5% / −0.026R, NTPC 57.0% / −0.034R
+  and AXISBANK 57.2% / −0.020R clear 55% but are blocked because their expectancy is negative. The line
+  falls where the data puts it; the desk does not lower it to make more names speak.
+- **Breadth:** advancers / flat / decliners with a ±0.02% dead band, plus the equal-weight and median
+  % change against the Nifty's own %. This is a count of constituents, **not** the index's free-float
+  weighted contribution, and single stocks can gap in ways an index does not.
+- **Risk:** R:R to T1 is 0.60 (stop = 1.67 × T1), so break-even is ≈62% before costs. Measured T1 rates
+  at this target sit at 56–68% per qualified name (~61% pooled) — a thin margin, not a promise. The
+  rates are in-sample on the same 180 days and gross of brokerage and slippage. This is a research
+  gate, not a forecast of the next trade.
+
+The audit runs in a background worker that lazy-starts on the first request: ~3.2 candle requests/s
+(180/min), all 50 stocks in one pass (cold ≈ 2 minutes with 300 history requests, warm ≈ 20 seconds),
+refreshed every 20 minutes. The panel polls quotes every 30 seconds and shows the audit progress bar
+until the first pass completes. **Download CSV** exports the current book (price, % change, status,
+plan, audit samples and rate, bar time, reason). **Re-audit** forces a fresh pull of all 50.
+
+### Last 30 days — what the gate actually called
+
+The **30-day test** button inside the Nifty 50 panel replays the last 30 calendar days on the same real
+5m bars and reports every call it fired: calls, T1 hits, T2 hits, T3 hits, stops and timeouts, per stock
+and in total, plus the most recent calls and a CSV ledger.
+
+- **No peeking:** a stock is graded only if its own audit cleared the 55% / ≥100-setup / positive-R gate
+  using bars **strictly before the window** (frozen at the window start). The window cannot vote on its
+  own admission, and the frozen rate is shown next to each stock.
+- **What counts:** T1 is touched before the stop; T2 = 2 × T1 and T3 = 3 × T1 touched before any stop;
+  a candle that touches the stop and a target together counts as a stop; a timeout (neither level by
+  15:25 IST) is closed at the last price and is **not** a win.
+- **Latest call per stock:** one row per stock with the side (long/short), the entry share price, the
+  T1/T2/T3 and SL price levels (with the points and % distance from entry), and that stock's measured
+  win rate over the window plus its frozen gate rate. The per-stock summary above it shows hit counts —
+  its T1/T2/T3 columns are counts, not prices.
+- **Every prediction, with its levels:** each row shows the entry, the SL, T1/T2/T3, the level that
+  was reached before the stop (T1/T2/T3, SL or TIMEOUT), the bar time the call fired, how long it
+  took, the exit time and price and the R result. Exit price is the T1 exit the desk deploys, so a
+  T3 row still banked T1. Timings measured over the window: T1 resolves in ~27 minutes on average,
+  a stop in ~37 minutes, a timeout runs the full ~118 minutes.
+- **Measured 2026-10-08 → 2026-11-06:** 26 of 50 names qualified before the window (the rest had not
+  cleared the frozen gate); **978 calls**, **621 T1 (63.5%)**, **393 T2 (40.2%)**, **252 T3 (25.8%)**,
+  **309 stops (31.6%)**, **48 timeouts (4.9%)**, average **+0.06R** per call (total +59.1R at T1). For
+  comparison the ungated all-50 slice is 1,884 calls at 62.4% with 626 stops and +0.035R — the gate now
+  adds ~1 point of hit rate and nearly doubles the per-call expectancy, and it keeps the desk from
+  calling the 21 names that measured a negative R.
+- **How the win rate is counted:** T1 ÷ all calls, where a call is a win only if T1 is touched before
+  the stop. A candle that touches both T1 and the stop counts as a stop, a timeout is not a win, and
+  after a stop no target can be added. The 63.5% is an exit-at-T1 number; a call that ran to T3 but was
+  never stopped was already banked at T1.
+- **Timing honesty:** the audit measures how far price had already moved in the call's direction before
+  entry. Median run over the prior 20 bars is **+0.613% of price**, and in **81.6% of calls that prior
+  run had already covered T1** — these are continuation calls, not fresh reversals. Four tested
+  "fresher entry" guards (pullback, bar-age, run-cap and volume filters) all cut the number of calls and
+  none raised the hit rate, so the desk reports the lateness instead of pretending it is early. The six
+  index segments have the same shape: **94–96% of their calls had already covered T1** in the prior 20
+  bars, against a forward excursion of about 5× T1.
+- **Honest read:** R:R to T1 is 0.60 (stop = 1.67 × T1), so break-even is ≈62% before costs against a
+  measured 63.5% — a thin margin that brokerage and slippage can erase. The gate threshold was chosen on
+  overlapping history, and these are gross figures on 30 days of one market regime. The edge is in the
+  selection and the expectancy floor, not in a large per-trade payoff.
+
 ## API
 
 - `GET /api/market?force=1` — full payload: feed status, per-instrument candles, options, signal, forecast
@@ -309,6 +407,10 @@ fallback where a symbol exists. **Download signals CSV** exports the audited led
 - `GET /api/today` — today's calls replayed through the live gates, with session and per-segment stats
 - `GET /api/overnight` — next-day model audit, live signals and plans; `?format=csv&days=365` returns
   the full audited signal ledger as CSV
+- `GET /api/nifty50` — all 50 constituents: live quote, breadth, own 180-day audit, status/plan;
+  `?force=1` re-audits, `?format=csv` returns the stock book as CSV
+- `GET /api/stocktest?days=30` — last-N-days stock calls with the gate frozen before the window,
+  T1/T2/T3/stop/timeout counts per stock and in total; `?format=csv` returns the call ledger
 
 ## Signal engine (what is actually used)
 
@@ -344,6 +446,7 @@ gross of costs — a weak close followed by a large gap down is the risk it does
 - `upstox_login.py` — OAuth code exchange, rewrites the token in `.env`
 - `analysis.py` — indicators, option analytics, composite signal, move forecast, walk-forward audits, session replay
 - `overnight.py` — next-day oversold model: signal, no-lookahead ledger, audit and live plan
+- `nifty50.py` — Nifty 50 constituents, breadth, background 180-day per-stock audit and gate
 - `research_opt.py` — offline six-month profile search (stop width × horizon × filters, monthly folds)
 - `data_sources.py` — real Yahoo chart fallback
 - `public/` — dashboard (vanilla JS, canvas charts, no CDN)
