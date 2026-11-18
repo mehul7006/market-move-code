@@ -140,7 +140,7 @@ def _fetch_constituents():
 
 def constituents(root, force=False):
     """Live Nifty 50 list from NSE's index CSV, cached to disk, with a labelled snapshot."""
-    path = os.path.join(root, ".candle_cache", "nifty50_constituents.json")
+    path = os.path.join(_cache_dir(root), "nifty50_constituents.json")
     cached = None
     try:
         with open(path, encoding="utf-8") as fh:
@@ -489,6 +489,10 @@ def _dur_label(minutes):
     return f"{minutes // 60}h {minutes % 60:02d}m"
 
 
+def _cache_dir(root):
+    return os.environ.get("CACHE_DIR") or os.path.join(root, ".candle_cache")
+
+
 class Desk:
     """Quotes + breadth on every request; audits in a rate-limited background worker."""
 
@@ -505,7 +509,7 @@ class Desk:
                        "startedAt": None, "finishedAt": None, "cycle": 0, "failed": []}
         self._thread = None
         self._wake = False
-        self._store = os.path.join(root, ".candle_cache", "nifty50_audits.json")
+        self._store = os.path.join(_cache_dir(root), "nifty50_audits.json")
         self._load()
 
     # -- persistence -------------------------------------------------------------
@@ -530,7 +534,7 @@ class Desk:
 
     # -- data --------------------------------------------------------------------
     def _bars_for(self, stock, force=False):
-        path = os.path.join(self.root, ".candle_cache", f"stk_{stock['symbol']}.json")
+        path = os.path.join(_cache_dir(self.root), f"stk_{stock['symbol']}.json")
         cached, age = None, 1e9
         try:
             age = time.time() - os.path.getmtime(path)
@@ -762,7 +766,7 @@ class Desk:
         if bars:
             return bars
         try:
-            with open(os.path.join(self.root, ".candle_cache", f"stk_{symbol}.json"),
+            with open(os.path.join(_cache_dir(self.root), f"stk_{symbol}.json"),
                       encoding="utf-8") as fh:
                 bars = json.load(fh)
         except Exception:

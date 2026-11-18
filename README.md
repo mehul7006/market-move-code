@@ -455,3 +455,34 @@ gross of costs — a weak close followed by a large gap down is the risk it does
 
 The same dashboard can be wrapped into an Android APK with Capacitor (WebView + packaged local server).
 Do that after the feeds and token-refresh flow are settled.
+
+## Deploy on Render (free tier)
+
+The repo ships a `Dockerfile` and a `render.yaml` Blueprint. The app is pure Python (no packages to install).
+
+1. Push this repo to GitHub, then in Render: **New + → Blueprint → select the repo** (or **New + → Web Service → Docker**
+   with plan **Free**, region **Singapore**, health-check path `/healthz`).
+2. Set these environment variables (Render asks for them; the server **refuses to start** without a login):
+
+   | Variable | What |
+   |---|---|
+   | `DESK_USER`, `DESK_PASS` | the site login (required) |
+   | `DESK_ADMIN_KEY` | unlocks the **Access** panel where you paste the daily Upstox token |
+   | `UPSTOX_API_KEY`, `UPSTOX_API_SECRET` | your Upstox app credentials |
+   | `UPSTOX_ACCESS_TOKEN` | optional - you can paste it in the Access panel instead |
+   | `LITE_MODE=1` | already set by the Dockerfile / blueprint |
+
+3. Open the Render URL, log in, press **Access**, paste a fresh Upstox token (it expires every night ~03:30 IST).
+
+### What "LITE_MODE" does on the free tier
+Render free = **0.1 CPU, 512 MB RAM, no disk, sleeps after ~15 min without visitors**. LITE mode makes the app safe there:
+requests never wait for a heavy build (pages answer *"waking up"* and retry by themselves), the background refresh runs only
+while someone is looking and runs at the lowest OS priority, and the 6-month scorecard is served from `scorecard_snapshot.json`
+(refresh it locally with `python scorecard.py --snapshot` and commit). Measured under those exact limits (`docker run --cpus 0.1
+--memory 512m`): dashboard ready ~90-100 s after the server wakes, every page ready in ~4.5 min, peak memory ~200 MB.
+
+Things to know: after a sleep/restart the pasted token is gone (no disk) - paste it again or update `UPSTOX_ACCESS_TOKEN` in the
+Render dashboard; to keep the service awake use a free uptime pinger (UptimeRobot / cron-job.org) on `/healthz` every 10 minutes
+(about 744 h/month, inside Render's 750 free hours); live tracking refreshes about every 1-2 minutes on 0.1 CPU, not every 5 s.
+
+Run it locally the same way: `docker build -t market-desk . && docker run --env-file .env -p 10000:10000 market-desk`.

@@ -1,0 +1,20 @@
+# Never bake secrets or local data into the image
+.env
+.env.*
+.git
+.gitignore
+.candle_cache
+tools
+nginx
+__pycache__
+*.pyc
+*.log
+*.png
+*.csv
+scorecard_out.json
+backtest_60d_result.json
+calls_60d.html
+.research
+Dockerfile
+.dockerignore
+render.yaml

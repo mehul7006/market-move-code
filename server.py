@@ -31,8 +31,17 @@ import upstox
 PORT = int(os.environ.get("PORT", "8787"))
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
+# Where downloaded history is cached. On Render point CACHE_DIR at the persistent disk (e.g. /data/cache).
+CACHE_DIR = os.environ.get("CACHE_DIR") or os.path.join(ROOT, ".candle_cache")
+# LITE_MODE=1 is for small hosts (Render free tier: 0.1 CPU, 512 MB, sleeps when idle). Requests never wait for a heavy
+# build (they get a 202 "warming up" and the page retries), the background refresh only runs while someone is looking and
+# slows to what the CPU can sustain, and the 6-month scorecard is served from a snapshot instead of being recomputed.
+LITE = os.environ.get("LITE_MODE") == "1"
+_BOOT = time.time()
+_last_request = time.time()
+_cycle = {"sec": 3}
 
-ENV = upstox.load_env(os.path.join(ROOT, ".env"))
+ENV = desk_env.current()
 TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN") or ENV.get("UPSTOX_ACCESS_TOKEN", "")
 UX = upstox.UpstoxClient(TOKEN)
 _token_lock = threading.Lock()
@@ -433,7 +442,7 @@ def build_recent_calls(days=30):
 
 def _hist_1m(inst):
     """Real Upstox 1-minute history (~189 days, 27-day chunks), disk-cached per IST date, plus today."""
-    path = os.path.join(ROOT, ".candle_cache", f"hist1m_{inst['id']}.json")
+    path = os.path.join(CACHE_DIR, f"hist1m_{inst['id']}.json")
 
     def fetch():
         stamp = str(_ist_today())
@@ -447,7 +456,7 @@ def _hist_1m(inst):
             pass
         rows = {}
         today = datetime.date.today()
-        for k in range(7):                       # ~189 days: enough for the 6-month scorecard window
+        for k in range(3 if LITE else 7):        # ~189 days for the 6-month scorecard; 81 days in lite mode
             end = today - datetime.timedelta(days=27 * k + 1)
             start = end - datetime.timedelta(days=26)
             try:
@@ -493,7 +502,7 @@ _FUT_UNDER = {"NIFTY": ("NSE", "NSE_FO", "NIFTY"), "BANKNIFTY": ("NSE", "NSE_FO"
 
 def _future_keys():
     """Near-month future instrument key per index, from Upstox's public instrument master (cached per day)."""
-    path = os.path.join(ROOT, ".candle_cache", "futkeys.json")
+    path = os.path.join(CACHE_DIR, "futkeys.json")
     stamp = str(_ist_today())
     try:
         with open(path) as fh:
@@ -754,7 +763,7 @@ def _calls_csv(res):
 
 def _history(inst, days=30):
     """Upstox 5m history over `days`, chunked (the API caps one request at ~30 days)."""
-    path = os.path.join(ROOT, ".candle_cache", f"hist_{inst['id']}_{days}.json")
+    path = os.path.join(CACHE_DIR, f"hist_{inst['id']}_{days}.json")
 
     def fetch():
         try:
@@ -856,7 +865,7 @@ def market_open():
 
 
 def _cache_path(inst):
-    return os.path.join(ROOT, ".candle_cache", inst["id"] + ".json")
+    return os.path.join(CACHE_DIR, inst["id"] + ".json")
 
 
 def _load_cached_candles(inst):
@@ -1001,7 +1010,7 @@ def _normalise_daily(rows):
 
 def _overnight_daily(inst):
     """~3 years of real daily bars: Upstox first, Yahoo (real, labelled) as fallback."""
-    path = os.path.join(ROOT, ".candle_cache", f"on_{inst['id']}_3y.json")
+    path = os.path.join(CACHE_DIR, f"on_{inst['id']}_3y.json")
 
     def fetch():
         try:
@@ -1416,6 +1425,12 @@ def _market_bytes(force=False):
     """Serve the already-built market payload instantly (a background thread keeps it fresh). Only when nothing has
     been built yet, or the copy is stale, does the request wait for a rebuild."""
     data, t = _payload["data"], _payload["t"]
+    if LITE:                                           # never wait for a rebuild: the background thread owns it
+        if data is None:
+            return None
+        if _mb["t"] != _payload["t"]:
+            _mb["b"], _mb["t"] = json.dumps(data).encode("utf-8"), _payload["t"]
+        return _mb["b"]
     age = time.time() - t if data else None
     if data is None or age > 120 or (force and age > 8):
         data = build_market(force)
@@ -1425,34 +1440,108 @@ def _market_bytes(force=False):
 
 
 _last = {}
+_building = {}
+_BG_OWNED = ("short", "active")
+_bg_started = {"on": False}
 
 
 def _remember(name, data):
+    if isinstance(data, dict):
+        data["refreshSeconds"] = round(_cycle["sec"])
     _last[name] = (time.time(), data)
     return data
 
 
-def _serve(name, builder, max_open=25, max_closed=300):
-    """Answer instantly from the latest finished build (the background thread keeps it fresh); only build in the
-    request when nothing is ready yet or the copy is too old."""
+def _lower_priority():
+    """Run heavy background work at the lowest OS priority (Linux per-thread nice), so on a 0.1-CPU host the web
+    handlers always get the CPU first and a request never waits behind a build."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+    except Exception:
+        pass
+
+
+def _kick(name, builder):
+    """Build in a background thread (single flight) so no request ever waits on a heavy computation."""
+    if _building.get(name):
+        return
+
+    def run():
+        _lower_priority()
+        _building[name] = True
+        try:
+            _remember(name, builder())
+        except Exception:
+            pass
+        finally:
+            _building[name] = False
+    threading.Thread(target=run, daemon=True, name="build-" + name).start()
+
+
+def _age(name):
     ent = _last.get(name)
+    return int(time.time() - ent[0]) if ent else None
+
+
+def _serve(name, builder, max_open=25, max_closed=300):
+    """Answer instantly from the latest finished build. Normal mode: rebuild in the request only if nothing is ready or
+    the copy is too old. LITE mode: never wait - return the latest copy (even if old, the page shows its age) or None
+    while the very first build is still running."""
+    ent = _last.get(name)
+    if LITE:
+        own = name in _BG_OWNED and _bg_started["on"]       # the background loop already builds these - don't duplicate
+        if ent is None:
+            if not own:
+                _kick(name, builder)
+            return None
+        if time.time() - ent[0] > 120 and not own:
+            _kick(name, builder)
+        return ent[1]
     if ent and time.time() - ent[0] < (max_open if market_open() else max_closed):
         return ent[1]
     return _remember(name, builder())
 
 
+def _warming(handler, what):
+    handler._send(202, json.dumps({"warming": True, "what": what, "seconds": int(time.time() - _BOOT)}).encode(),
+                  "application/json; charset=utf-8")
+
+
+def _score_loader():
+    """LITE: the precomputed 6-month snapshot (recomputing it takes minutes on a 0.1-CPU host)."""
+    snap = os.path.join(ROOT, "scorecard_snapshot.json")
+    if LITE and os.path.exists(snap):
+        with open(snap, encoding="utf-8") as fh:
+            d = json.load(fh)
+        d["snapshot"] = True
+        return d
+    return build_scorecard()
+
+
 def _background_refresher():
     """Keep the dashboard and short-term data warm so opening the page never waits on Upstox / Yahoo."""
+    _lower_priority()
+    _bg_started["on"] = True
     while True:
+        t0 = time.time()
+        if LITE and t0 - _last_request > 600:          # nobody is looking: save CPU, let the host sleep
+            time.sleep(10)
+            continue
         try:
             build_market(force=True)
+        except Exception:
+            pass
+        try:
             _remember("short", build_short(60))
             _remember("active", build_active())
-            if time.time() - _last.get("score", (0,))[0] > 1800:          # heavy (6 months, 6 segments): every 30 min
+            if not LITE and time.time() - _last.get("score", (0,))[0] > 1800:      # heavy: every 30 min
                 _remember("score", build_scorecard())
         except Exception:
             pass
-        time.sleep(3 if market_open() else 30)
+        dur = time.time() - t0
+        floor = 3 if market_open() else 30
+        _cycle["sec"] = max(floor, 2 * dur) if LITE else floor
+        time.sleep(_cycle["sec"] if LITE else floor)
 
 
 def build_market(force=False):
@@ -1873,8 +1962,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.split("?")[0] == "/healthz":          # for Render / uptime monitors; reveals nothing
+            self._send(200, b"ok", "text/plain; charset=utf-8")
+            return
         if not self._gate():
             return
+        global _last_request
+        _last_request = time.time()
         parsed = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(parsed.query)
         if parsed.path == "/favicon.ico":
@@ -1894,7 +1988,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/market":
             try:
-                self._send(200, _market_bytes("1" in qs.get("force", [])), "application/json; charset=utf-8")
+                body = _market_bytes("1" in qs.get("force", []))
+                if body is None:
+                    _warming(self, "market data")
+                else:
+                    self._send(200, body, "application/json; charset=utf-8")
             except Exception as exc:
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
@@ -1925,14 +2023,22 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/active":
             try:
-                self._send(200, json.dumps(_serve("active", build_active)).encode("utf-8"), "application/json; charset=utf-8")
+                res = _serve("active", build_active)
+                if res is None:
+                    _warming(self, "active calls")
+                else:
+                    self._send(200, json.dumps(dict(res, ageSeconds=_age("active"))).encode("utf-8"),
+                               "application/json; charset=utf-8")
             except Exception as exc:
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
 
         if parsed.path == "/api/scorecard":
             try:
-                res = _serve("score", build_scorecard, 3600, 3600)
+                res = _serve("score", _score_loader, 3600, 3600)
+                if res is None:
+                    _warming(self, "scorecard")
+                    return
                 if qs.get("format", ["json"])[0] == "csv":
                     import scorecard
                     self._send(200, scorecard.to_csv(res).encode("utf-8"), "text/csv; charset=utf-8",
@@ -1947,6 +2053,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 days = max(5, min(150, int(qs.get("days", ["60"])[0] or 60)))
                 res = _serve("short", lambda: build_short(60)) if days == 60 else build_short(days)
+                if res is None:
+                    _warming(self, "short-term calls")
+                    return
+                if days == 60:
+                    res = dict(res, ageSeconds=_age("short"))
                 if qs.get("format", ["json"])[0] == "csv":
                     tf = qs.get("tf", ["all"])[0]
                     self._send(200, _short_csv(res, tf).encode("utf-8"), "text/csv; charset=utf-8",
@@ -2072,6 +2183,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    if os.environ.get("REQUIRE_LOGIN") == "1":
+        user, password, _ = _auth_config()
+        if not (user and password):
+            sys.exit("REFUSING TO START: REQUIRE_LOGIN=1 but DESK_USER / DESK_PASS are not set. This server is public, "
+                     "so set both as environment variables (Render dashboard > Environment) and redeploy.")
     admin_key, created = desk_env.ensure_admin_key()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Market Signal Desk running at  http://localhost:{PORT}")
@@ -2081,6 +2197,8 @@ def main():
     site_user, site_pass, _ = _auth_config()
     if site_user and site_pass:
         print(f"Site login applies to public links only (user '{site_user}'); localhost needs no login")
+    if LITE:
+        sys.setswitchinterval(0.001)       # hand the interpreter lock to waiting request threads more often
     threading.Thread(target=_background_refresher, daemon=True, name="market-refresher").start()
     try:
         server.serve_forever()

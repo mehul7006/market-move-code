@@ -51,7 +51,14 @@ async function load(force) {
   try {
     const r = await fetch("/api/market" + (force ? "?force=1" : ""));
     if (!r.ok) throw new Error("HTTP " + r.status);
-    state.data = await r.json();
+    const body = await r.json();
+    if (body && body.warming) {                       // free host just woke up - keep retrying, never show an error
+      $("feedNotes").innerHTML = `<div class="note"><span>⏳ The free server was asleep and is waking up — loading real market data
+        (${body.seconds != null ? "up " + body.seconds + " s, " : ""}usually 1–3 minutes). This page retries by itself — just keep it open.</span></div>`;
+      setTimeout(() => load(false), 6000);
+      return;
+    }
+    state.data = body;
     state.lastLoad = Date.now();
     render();
   } catch (e) {
@@ -100,6 +107,12 @@ function render() {
   renderBoard(inst);
   renderOptions(inst);
   renderRail(sectors);
+}
+
+function warmingHtml(what, d) {
+  return `<div class="loading"><span class="spinner"></span> The free server was asleep and is waking up — loading real ${what}.
+    This takes about 1–3 minutes after it has been idle. <b>This page retries by itself</b>; just keep it open.
+    ${d && d.seconds != null ? `<span class="fcs">(server up ${d.seconds} s)</span>` : ""}</div>`;
 }
 
 function renderFeeds(d) {
@@ -1094,6 +1107,7 @@ function loadActive(silent) {
   return fetch("/api/active")
     .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then((d) => {
+      if (d.warming) { $("activeBody").innerHTML = warmingHtml("calls", d); setTimeout(() => { if (!$("activeModal").classList.contains("hidden")) loadActive(false); }, 6000); return; }
       activeData = d;
       const modal = $("activeModal").querySelector(".modal");
       const top = modal ? modal.scrollTop : 0;
@@ -1227,6 +1241,7 @@ function loadShort(silent) {
   return fetch("/api/short")
     .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then((d) => {
+      if (d.warming) { body.innerHTML = warmingHtml("short-term data", d); setTimeout(() => { if (!$("shortModal").classList.contains("hidden")) loadShort(false); }, 6000); return; }
       shortData = d;
       const modal = $("shortModal").querySelector(".modal");
       const top = modal ? modal.scrollTop : 0;
@@ -1368,7 +1383,7 @@ function renderShort() {
     ? `<span class="${kind === "sl" ? "neg" : "pos"}">✓ touched ${todayClock(at)}</span>`
     : `<span class="fcs">${kind === "sl" ? "room " : "needs "}${need(r, lvl, kind)}</span>`;
   const liveChip = d.marketOpen
-    ? `<span class="fc-badge pos">● LIVE · re-checked every 5 s · ${todayClock(d.serverTime)} IST</span>`
+    ? `<span class="fc-badge ${(d.ageSeconds || 0) > 180 ? "" : "pos"}">● LIVE · server refreshes about every ${d.refreshSeconds || 5} s · data from ${todayClock(d.serverTime)} IST${(d.ageSeconds || 0) > 180 ? " (refreshing…)" : ""}</span>`
     : `<span class="fc-badge">market closed · last data ${todayClock(d.serverTime)} IST</span>`;
   const ltpStrip = Object.entries(d.ltp || {}).map(([seg, v]) =>
     `<span class="fc-badge">${esc(seg)} ${v.last == null ? "—" : fmt(v.last)}${v.fresh ? "" : " (stale)"}</span>`).join(" ");
@@ -1499,7 +1514,10 @@ function openScore() {
     Upstox candles (first load takes ~45 s, then it is cached for 10 minutes)…</div>`;
   fetch("/api/scorecard")
     .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then((d) => { scoreData = d; renderScore(); })
+    .then((d) => {
+      if (d.warming) { $("scoreBody").innerHTML = warmingHtml("scorecard", d); setTimeout(() => { if (!$("scoreModal").classList.contains("hidden")) openScore(); }, 6000); return; }
+      scoreData = d; renderScore();
+    })
     .catch((e) => {
       $("scoreBody").innerHTML = `<div class="error-state"><div class="big">SCORECARD UNAVAILABLE</div>
         <div class="why">${esc(e.message)}</div><div class="fix">Needs a valid Upstox token — real candles only.</div></div>`;
@@ -1567,7 +1585,10 @@ function renderScore() {
 
   $("scoreBody").innerHTML = `
     <div class="proof-card">
-      <div class="pf-h">Is the data real? <span class="fc-badge pos">audited</span></div>
+      <div class="pf-h">Is the data real? <span class="fc-badge pos">audited</span>
+        ${d.snapshot ? `<span class="fc-badge">snapshot from ${new Date(d.snapshotAt * 1000).toLocaleDateString("en-GB")}</span>` : ""}</div>
+      ${d.snapshot ? `<div class="pf-note">This hosted copy shows a scorecard computed on ${new Date(d.snapshotAt * 1000).toLocaleDateString("en-GB")}
+        (re-computing 6 months on a small free server takes minutes). Run <code>python scorecard.py --snapshot</code> to refresh it.</div>` : ""}
       <div class="pf-note">Every candle is real Upstox market data: 5m from ${esc(d.dataSpan["5m NIFTY"].from)} and 1m from ${esc(d.dataSpan["1m NIFTY"].from)} to
         ${esc(d.dataSpan["1m NIFTY"].to)}. The audit found <b>0 non-Upstox bars, 0 bad candles, 0 duplicates</b>; every five-minute bar matches its
         1-minute bars exactly; daily closes agree with Yahoo Finance (median difference 0.01%); and there is <b>no random / mock / synthetic generator</b>

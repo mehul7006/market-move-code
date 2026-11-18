@@ -260,3 +260,17 @@ def to_csv(payload):
                 w.writerow(["short", r["segment"], tf + "m", wd, s["calls"], s["winRate"], s["slRate"], s["t1Rate"],
                             s["t2Rate"], s["t3Rate"], s["timeouts"], s["profitFactor"], s["avgPlanPts"], r.get("verdict")])
     return out.getvalue()
+
+
+if __name__ == "__main__":
+    # python scorecard.py --snapshot   -> writes scorecard_snapshot.json (served on small hosts that cannot recompute it)
+    import sys
+    sys.path.insert(0, ROOT)
+    import server
+    server._sync_token_from_env()
+    if "--snapshot" in sys.argv:
+        data = build(server)
+        data["snapshotAt"] = int(time.time())
+        with open(os.path.join(ROOT, "scorecard_snapshot.json"), "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        print("wrote scorecard_snapshot.json")

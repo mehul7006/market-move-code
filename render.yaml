@@ -1,0 +1,32 @@
+# Render Blueprint (FREE tier): New + > Blueprint > pick this repo. Render builds the Dockerfile and asks for the secrets.
+#
+# Free-tier facts this setup is built around (Render free web service = 0.1 CPU, 512 MB RAM, no persistent disk,
+# sleeps after ~15 min without visitors, 750 free hours a month):
+#   * LITE_MODE=1 makes the app safe on that hardware: it never makes a request wait for a heavy build (the page shows
+#     "waking up" and retries), refreshes only while someone is looking, and serves a precomputed 6-month scorecard.
+#   * No disk: a token pasted in the Access panel lives until the instance restarts. After a restart, paste it again
+#     (or update the UPSTOX_ACCESS_TOKEN environment variable in the Render dashboard).
+#   * To stop it sleeping, point a free uptime pinger (UptimeRobot / cron-job.org) at /healthz every 10 minutes.
+services:
+  - type: web
+    name: market-signal-desk
+    runtime: docker
+    region: singapore            # nearest Render region to India
+    plan: free
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: LITE_MODE
+        value: "1"
+      - key: DESK_USER           # site login (required - the server refuses to start without it)
+        sync: false
+      - key: DESK_PASS
+        sync: false
+      - key: DESK_ADMIN_KEY      # unlocks the Access panel where you paste a fresh Upstox token each morning
+        sync: false
+      - key: UPSTOX_API_KEY
+        sync: false
+      - key: UPSTOX_API_SECRET
+        sync: false
+      - key: UPSTOX_ACCESS_TOKEN # optional here: you can paste it later in the Access panel instead
+        sync: false

@@ -10,7 +10,15 @@ import secrets
 import threading
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-ENV_PATH = os.path.join(ROOT, ".env")
+# On a host without a writable project folder (Render, Docker) point DESK_ENV_FILE at a persistent disk path.
+ENV_PATH = os.environ.get("DESK_ENV_FILE") or os.path.join(ROOT, ".env")
+# Settings that may also come from real environment variables (Render dashboard / docker -e). A value saved in the
+# file (for example a token pasted in the Access panel) wins over the environment variable.
+ENV_KEYS = ("DESK_USER", "DESK_PASS", "DESK_ADMIN_KEY", "UPSTOX_API_KEY", "UPSTOX_API_SECRET", "UPSTOX_ACCESS_TOKEN")
+
+
+def _from_environ():
+    return {k: os.environ[k].strip() for k in ENV_KEYS if os.environ.get(k, "").strip()}
 
 _lock = threading.Lock()
 _cache = {"mtime": None, "env": {}}
@@ -34,10 +42,10 @@ def current(path=ENV_PATH):
     try:
         mtime = os.path.getmtime(path)
     except OSError:
-        return {}
+        return _from_environ()
     with _lock:
         if _cache["mtime"] != mtime:
-            _cache["env"] = load_env(path)
+            _cache["env"] = {**_from_environ(), **load_env(path)}
             _cache["mtime"] = mtime
         return dict(_cache["env"])
 
@@ -58,6 +66,7 @@ def write_var(key, value, path=ENV_PATH):
             if lines and not lines[-1].endswith("\n"):
                 lines[-1] += "\n"
             lines.append(f"{key}={value}\n")
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             fh.writelines(lines)
