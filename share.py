@@ -46,7 +46,7 @@ def find_ngrok():
     local = os.path.join(TOOLS, EXE)
     if os.path.isfile(local):
         return local
-    for pattern in (r"E:/nginx*/ngrok.exe", r"C:/Program Files/ngrok/ngrok.exe",
+    for pattern in (r"E:/ngrok.exe", r"E:/nginx*/ngrok.exe", r"C:/Program Files/ngrok/ngrok.exe",
                     r"C:/Program Files (x86)/ngrok/ngrok.exe"):
         hit = glob.glob(pattern)
         if hit:

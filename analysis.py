@@ -118,7 +118,7 @@ def supertrend(candles, p=10, mult=1.5):
 # ---------------------------------------------------------------- option chain
 
 def analyze_chain(chain, spot, step):
-    """Turn a raw NSE option-chain payload (or demo equivalent) into OI analytics."""
+    """Turn a raw NSE option-chain payload into OI analytics."""
     recs = (chain or {}).get("records", {}).get("data") or []
     expiries = (chain or {}).get("records", {}).get("expiryDate") or []
     if not recs or not expiries or not spot:
@@ -786,6 +786,8 @@ def validate_forecast(candles, min_move, params=None, lookback=1000, since_ts=No
             "targetsHit": (3 if t3_bar is not None else 2 if t2_bar is not None
                            else 1 if t1_bar is not None else 0),
             "outcome": outcome, "bars": bars,
+            # extra detail only (does not affect any decision): candles after entry in which each level was touched
+            "t1Bars": t1_bar, "t2Bars": t2_bar, "t3Bars": t3_bar, "stopBars": stop_bar,
             "minutes": bars * 5 if bars is not None else None,
             "exit": _r(exit_px),
             "r": round(pnl / stop_dist, 2) if stop_dist else None,

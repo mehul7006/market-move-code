@@ -546,3 +546,7 @@ table.n5-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .n5-table tr.st-off td { opacity: .62; }
 @media (max-width: 900px) { .st-src-grid { grid-template-columns: 1fr; }
   .st-funnel { gap: 10px; } }
+
+.gen-tabs{display:flex;gap:8px;padding:0 4px 12px}
+.gen-tab{min-width:130px}
+.sh-tf .fcs{display:block;font-size:11px}

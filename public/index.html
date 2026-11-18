@@ -24,7 +24,8 @@
       <span class="track"><span class="thumb"></span></span>
       <span class="switch-label">Live · 5s</span>
     </label>
-    <button class="btn btn-accent" id="todayBtn">Today's calls</button>
+    <button class="btn btn-accent" id="shortBtn">Generate calls</button>
+    <button class="btn" id="todayBtn" style="display:none">Today's calls</button>
     <button class="btn" id="niftyBtn">Nifty 50</button>
     <button class="btn" id="overnightBtn">Next-day</button>
     <button class="btn" id="researchBtn">Research</button>
@@ -141,17 +142,36 @@
   </div>
 </div>
 
+<div class="modal-backdrop hidden" id="shortModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h2>Generate calls</h2>
+        <p class="modal-sub">Short term = separate tested strategies per index on 1m / 5m / 15m / 30m candles, tighter
+          stops, ≥70% win target. Long term = the original six-segment precision profiles, unchanged.
+          Real Upstox data only; every call is counted once (SL / T1 / T2 / T3).</p>
+      </div>
+      <button class="modal-close" id="shortClose" aria-label="Close">✕</button>
+    </div>
+    <div class="gen-tabs"><button class="btn btn-accent gen-tab" data-tab="short">Short term</button>
+      <button class="btn ghost gen-tab" data-tab="long">Long term</button></div>
+    <div id="shortBody"></div>
+  </div>
+</div>
+
 <div class="modal-backdrop hidden" id="todayModal">
   <div class="modal">
     <div class="modal-head">
       <div>
-        <h2>Today's calls — six index segments, replayed through the live gates</h2>
+        <h2>Generate calls — Long term · six index segments, replayed through the live gates</h2>
         <p class="modal-sub">Every setup today's own rules would have issued on Sensex, Nifty, Bank Nifty,
           Fin Nifty, Midcap Select and Next 50, with entry, stop, T1/T2/T3, result, duration and stop-hit
           count. Outcomes close at 15:25 IST: a timeout is not a win. No lookahead.</p>
       </div>
       <button class="modal-close" id="todayClose" aria-label="Close">✕</button>
     </div>
+    <div class="gen-tabs"><button class="btn ghost gen-tab" data-tab="short">Short term</button>
+      <button class="btn btn-accent gen-tab" data-tab="long">Long term</button></div>
     <div id="todayBody"></div>
   </div>
 </div>

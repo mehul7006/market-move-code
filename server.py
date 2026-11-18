@@ -25,6 +25,7 @@ import data_sources as yahoo
 import desk_env
 import nifty50
 import overnight
+import shortterm
 import upstox
 
 PORT = int(os.environ.get("PORT", "8787"))
@@ -197,14 +198,18 @@ def _recent_all(inst_id, profile_key, candles, min_move, days=30):
 
 
 def _call_totals(rows):
+    # Mutually exclusive: each call is counted once, at the highest target hit before the stop.
     stats = {"calls": len(rows),
-             "t1": sum(1 for r in rows if r["outcome"] == "t1"),
-             "t2": sum(1 for r in rows if (r.get("targetsHit") or 0) >= 2),
-             "t3": sum(1 for r in rows if (r.get("targetsHit") or 0) >= 3),
+             "t1": sum(1 for r in rows if r["outcome"] == "t1" and (r.get("targetsHit") or 0) == 1),
+             "t2": sum(1 for r in rows if r["outcome"] == "t1" and (r.get("targetsHit") or 0) == 2),
+             "t3": sum(1 for r in rows if r["outcome"] == "t1" and (r.get("targetsHit") or 0) >= 3),
              "stops": sum(1 for r in rows if r["outcome"] == "stop"),
              "timeouts": sum(1 for r in rows if r["outcome"] == "timeout")}
     closed = [r for r in rows if r.get("r") is not None]
     stats["avgR"] = round(sum(r["r"] for r in closed) / len(closed), 3) if closed else None
+    anyt = stats["t1"] + stats["t2"] + stats["t3"]
+    stats["anyTargetRate"] = round(anyt / stats["calls"] * 100, 1) if stats["calls"] else None
+    stats["slRate"] = round(stats["stops"] / stats["calls"] * 100, 1) if stats["calls"] else None
     stats["winRate"] = round(stats["t1"] / stats["calls"] * 100, 1) if stats["calls"] else None
     stats["t2Rate"] = round(stats["t2"] / stats["calls"] * 100, 1) if stats["calls"] else None
     stats["t3Rate"] = round(stats["t3"] / stats["calls"] * 100, 1) if stats["calls"] else None
@@ -218,9 +223,9 @@ def filter_calls(res, name="all"):
         res["filter"] = "all"
         res["filteredFrom"] = len(res["calls"])
         return res
-    preds = {"t1": lambda r: r["outcome"] == "t1",
-             "t2": lambda r: (r.get("targetsHit") or 0) >= 2,
-             "t3": lambda r: (r.get("targetsHit") or 0) >= 3,
+    preds = {"t1": lambda r: r["outcome"] == "t1" and (r.get("targetsHit") or 0) == 1,
+             "t2": lambda r: r["outcome"] == "t1" and (r.get("targetsHit") or 0) == 2,
+             "t3": lambda r: r["outcome"] == "t1" and (r.get("targetsHit") or 0) >= 3,
              "sl": lambda r: r["outcome"] == "stop",
              "to": lambda r: r["outcome"] == "timeout"}
     pred = preds.get(name)
@@ -401,6 +406,11 @@ def build_recent_calls(days=30):
                                                     datetime.timezone.utc)
             e.update(segment=iid, name=entry["name"], minMove=inst["minMove"],
                      date=stamp.strftime("%Y-%m-%d"), time=stamp.strftime("%H:%M"))
+            # clock time of the 5m candle in which each level was first touched (None = not touched)
+            for key, bars in (("t1At", e.get("t1Bars")), ("t2At", e.get("t2Bars")),
+                              ("t3At", e.get("t3Bars")), ("slAt", e.get("stopBars"))):
+                e[key] = (e["barTime"] + bars * 300) if bars else None
+            e["entryAt"] = e["barTime"] + 300
             rows.append(e)
     rows.sort(key=lambda r: (r["barTime"], r["segment"]), reverse=True)
     stats = _call_totals(rows)
@@ -421,18 +431,227 @@ def build_recent_calls(days=30):
     }
 
 
+def _hist_1m(inst):
+    """Real Upstox 1-minute history (~135 days, 27-day chunks), disk-cached per IST date, plus today."""
+    path = os.path.join(ROOT, ".candle_cache", f"hist1m_{inst['id']}.json")
+
+    def fetch():
+        stamp = str(_ist_today())
+        try:
+            with open(path) as fh:
+                blob = json.load(fh)
+            if blob.get("date") == stamp and time.time() - os.path.getmtime(path) < 6 * 3600 \
+                    and len(blob.get("rows", [])) > 1000:
+                return blob["rows"]
+        except Exception:
+            pass
+        rows = {}
+        today = datetime.date.today()
+        for k in range(5):
+            end = today - datetime.timedelta(days=27 * k + 1)
+            start = end - datetime.timedelta(days=26)
+            try:
+                part = UX.candles(inst["key"], "minutes", 1, end.isoformat(), start.isoformat())
+            except Exception:
+                break
+            if not part:
+                break
+            for c in part:
+                rows.setdefault(c["t"], c)
+        bars = [rows[t] for t in sorted(rows)]
+        if len(bars) > 1000:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as fh:
+                    json.dump({"date": stamp, "rows": bars}, fh)
+            except Exception:
+                pass
+        return bars
+
+    rows = {c["t"]: c for c in cached(f"hist1m:{inst['id']}", 1800, fetch)}
+    try:
+        for c in cached(f"intra1m:{inst['id']}", 10, lambda: UX.intraday(inst["key"], "minutes", 1)):
+            rows[c["t"]] = c
+    except Exception:
+        pass
+    return [rows[t] for t in sorted(rows)]
+
+
+_FUT_UNDER = {"NIFTY": ("NSE", "NSE_FO", "NIFTY"), "BANKNIFTY": ("NSE", "NSE_FO", "BANKNIFTY"),
+              "SENSEX": ("BSE", "BSE_FO", "SENSEX")}
+
+
+def _future_keys():
+    """Near-month future instrument key per index, from Upstox's public instrument master (cached per day)."""
+    path = os.path.join(ROOT, ".candle_cache", "futkeys.json")
+    stamp = str(_ist_today())
+    try:
+        with open(path) as fh:
+            blob = json.load(fh)
+        if blob.get("date") == stamp:
+            return blob["keys"]
+    except Exception:
+        pass
+    import gzip
+    keys, now_ms = {}, time.time() * 1000
+    for exch in ("NSE", "BSE"):
+        req = urllib.request.Request(
+            f"https://assets.upstox.com/market-quote/instruments/exchange/{exch}.json.gz",
+            headers={"User-Agent": "Mozilla/5.0"})
+        ins = json.loads(gzip.decompress(urllib.request.urlopen(req, timeout=90).read()))
+        for seg, (ex, fo, under) in _FUT_UNDER.items():
+            if ex != exch:
+                continue
+            futs = [x for x in ins if x.get("segment") == fo and x.get("instrument_type") == "FUT"
+                    and x.get("underlying_symbol") == under and x.get("expiry", 0) >= now_ms - 86400000]
+            if futs:
+                keys[seg] = min(futs, key=lambda x: x["expiry"])["instrument_key"]
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump({"date": stamp, "keys": keys}, fh)
+    except Exception:
+        pass
+    return keys
+
+
+def _fut_candles(key):
+    """Real 5m futures candles with volume + open interest (7th field), last ~3 sessions."""
+    def fetch():
+        out, today = {}, datetime.date.today()
+        path = ("https://api.upstox.com/v3/historical-candle/{k}/minutes/5/{e}/{s}")
+        for url in (path.format(k=urllib.parse.quote(key, safe=""), e=today.isoformat(),
+                                s=(today - datetime.timedelta(days=6)).isoformat()),
+                    BASE3_INTRADAY.format(k=urllib.parse.quote(key, safe=""))):
+            try:
+                req = urllib.request.Request(url, headers={
+                    "Authorization": "Bearer " + UX.token, "Accept": "application/json", "User-Agent": upstox._UA})
+                with urllib.request.urlopen(req, timeout=25) as resp:
+                    data = json.loads(resp.read().decode("utf-8")).get("data") or {}
+            except Exception:
+                continue
+            for r in data.get("candles") or []:
+                try:
+                    ts = int(datetime.datetime.fromisoformat(r[0]).timestamp())
+                    out[ts] = (float(r[4]), float(r[5] or 0), float(r[6] or 0))
+                except Exception:
+                    continue
+        return [(t,) + out[t] for t in sorted(out)]
+    return cached(f"futc:{key}", 20, fetch)
+
+
+BASE3_INTRADAY = "https://api.upstox.com/v3/historical-candle/intraday/{k}/minutes/5"
+
+
+def _futures_context():
+    """Live volume / OI read from the near-month future. Context only - never used to gate a call."""
+    out = {}
+    try:
+        keys = cached("futkeys", 3600, _future_keys)
+    except Exception:
+        return out
+    now = time.time()
+    for seg, key in keys.items():
+        try:
+            rows = [r for r in _fut_candles(key) if r[0] + 300 <= now]
+            if len(rows) < 30:
+                continue
+            last = rows[-1]
+            prev = [r[2] for r in rows[-21:-1] if r[2] > 0]
+            vr = last[2] / (sum(prev) / len(prev)) if prev else None
+            ref = rows[-7]                       # six candles (30 min) back
+            day0 = next((r for r in rows if _day_ist(r[0]) == _day_ist(last[0])), rows[0])
+            dpx, doi = last[1] - ref[1], last[3] - ref[3]
+
+            def buildup(dp, do):
+                if do > 0:
+                    return "Long buildup (price up, OI up)" if dp > 0 else "Short buildup (price down, OI up)"
+                return "Short covering (price up, OI down)" if dp > 0 else "Long unwinding (price down, OI down)"
+            out[seg] = {
+                "contract": key, "asOf": last[0], "volume": last[2], "volumeRatio": round(vr, 2) if vr else None,
+                "oi": last[3], "oiChange30m": doi, "oiChangeDay": last[3] - day0[3],
+                "read": buildup(dpx, doi) if doi else "OI unchanged",
+                "volumeRead": ("Heavy volume" if vr and vr >= 1.5 else "Light volume" if vr and vr < 0.7
+                               else "Normal volume") if vr else None,
+            }
+        except Exception:
+            continue
+    return out
+
+
+def _day_ist(t):
+    return int(t + 19800) // 86400
+
+
+def build_short(days=60):
+    """Short-term page payload (shortterm.py): 1m / 5m / 15m / 30m. Real Upstox candles only."""
+    def make():
+        cmap = {1: {}, 5: {}, 15: {}, 30: {}}
+        errors = {}
+        for pid in shortterm.SEGMENTS:
+            inst = next(x for x in INSTRUMENTS if x["id"] == pid)
+            try:
+                base5 = _audit_candles(inst)
+                cmap[5][pid] = base5
+                cmap[15][pid] = shortterm.resample(base5, 15)
+                cmap[30][pid] = shortterm.resample(base5, 30)
+            except Exception as exc:
+                errors[pid] = str(exc)
+            try:
+                cmap[1][pid] = _hist_1m(inst)
+            except Exception as exc:
+                errors.setdefault(pid + "/1m", str(exc))
+        res = shortterm.build(cmap, days=days, futures=_futures_context())
+        for blk in res["timeframes"].values():
+            for seg in blk["segments"]:
+                err = errors.get(seg["id"]) or (errors.get(seg["id"] + "/1m") if blk["tf"] == 1 else None)
+                if err:
+                    seg["error"] = err
+        return res
+    return cached(f"short:{days}", 15, make)
+
+
+def _short_csv(res, tf="all"):
+    """Every short-term call with all levels and the clock time each one was touched (IST)."""
+    def clock(t):
+        return (datetime.datetime.fromtimestamp(t + 19800, datetime.timezone.utc)
+                .strftime("%Y-%m-%d %H:%M") if t else "")
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["date", "entry_time_ist", "candle_min", "index", "side", "entry", "SL", "SL_pts", "SL_touched_at",
+                "T1", "T1_pts", "T1_touched_at", "T1_after_min", "T2", "T2_pts", "T2_touched_at", "T2_after_min",
+                "T3", "T3_pts", "T3_touched_at", "T3_after_min", "result", "plan_exit_at", "plan_exit_reason",
+                "plan_pts", "pts_if_all_out_at_T1", "max_favourable_pts", "patterns"])
+    calls = []
+    for k, blk in res["timeframes"].items():
+        if k != "all" and tf in ("all", k):
+            calls.extend(blk["calls"])
+    calls.sort(key=lambda r: (r["t"], r["tf"], r["segment"]))
+    for r in calls:
+        w.writerow([r["date"], clock(r["entryAt"])[11:], r["tf"], r["segment"], r["side"], r["entry"], r["sl"],
+                    r["slPts"], clock(r.get("slAt")), r["t1"], r["t1Pts_"], clock(r.get("t1At")), r.get("t1After") or "",
+                    r["t2"], r["t2Pts_"], clock(r.get("t2At")), r.get("t2After") or "", r["t3"], r["t3Pts_"],
+                    clock(r.get("t3At")), r.get("t3After") or "", r["result"], clock(r.get("planExitAt")),
+                    r.get("planReason") or "", r["planPts"], r["t1ExitPts"], r["mfe"], "; ".join(r.get("patterns") or [])])
+    return out.getvalue()
+
+
 def _calls_csv(res):
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["date_ist", "time_ist", "segment", "side", "entry", "target1", "target2",
                 "target3", "stop", "stop_pts", "outcome", "exit", "mfe_pts",
-                "targets_hit", "bars", "minutes", "r_multiple", "min_move"])
+                "targets_hit", "bars", "minutes", "r_multiple", "min_move",
+                "T1_touched_at", "T2_touched_at", "T3_touched_at", "SL_touched_at"])
     for r in res["calls"]:
         w.writerow([r["date"], r["time"], r["segment"], r["direction"], r["entry"],
                     r["target1"], r["target2"], r["target3"], r["stop"],
                     r.get("stopDist"), r["outcome"], r.get("exit"), r.get("mfe"),
                     r.get("targetsHit"), r.get("bars"), r.get("minutes"),
-                    r.get("r"), r.get("minMove")])
+                    r.get("r"), r.get("minMove"),
+                    *[(datetime.datetime.fromtimestamp(r[k] + 19800, datetime.timezone.utc)
+                       .strftime("%Y-%m-%d %H:%M") if r.get(k) else "")
+                      for k in ("t1At", "t2At", "t3At", "slAt")]])
     return out.getvalue()
 
 
@@ -1417,8 +1636,18 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _is_local(self):
+        """True for a browser on this machine hitting the server directly (not via ngrok/nginx,
+        which connect from loopback too but add X-Forwarded-* headers)."""
+        fwd = (self.headers.get("X-Forwarded-For") or self.headers.get("X-Forwarded-Host")
+               or self.headers.get("X-Real-IP") or self.headers.get("Forwarded"))
+        return self.client_address[0] in ("127.0.0.1", "::1") and not fwd
+
     def _gate(self):
-        """Optional site-wide HTTP Basic auth, active only when DESK_USER + DESK_PASS are set."""
+        """Site login protects PUBLIC links only; local use (localhost) never asks for a login."""
+        _sync_token_from_env()          # a token saved to .env is applied on the very next request
+        if self._is_local():
+            return True
         user, password, _ = _auth_config()
         if not (user and password):
             return True
@@ -1438,6 +1667,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _admin(self, body_key=""):
         _, _, admin_key = _auth_config()
+        if self._is_local():
+            return True
         supplied = self.headers.get("X-Admin-Key", "") or body_key or ""
         if admin_key and supplied and hmac.compare_digest(supplied, admin_key):
             return True
@@ -1503,6 +1734,21 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body = json.dumps(build_today()).encode("utf-8")
                 self._send(200, body, "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+            return
+
+        if parsed.path == "/api/short":
+            try:
+                days = max(5, min(150, int(qs.get("days", ["60"])[0] or 60)))
+                res = build_short(days)
+                if qs.get("format", ["json"])[0] == "csv":
+                    tf = qs.get("tf", ["all"])[0]
+                    self._send(200, _short_csv(res, tf).encode("utf-8"), "text/csv; charset=utf-8",
+                               {"Content-Disposition": f'attachment; filename="short_term_calls_{tf}.csv"'})
+                    return
+                self._send(200, json.dumps(res).encode("utf-8"),
+                           "application/json; charset=utf-8")
             except Exception as exc:
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
@@ -1629,7 +1875,7 @@ def main():
     print(f"Access panel key: {admin_key if created else 'saved in .env as DESK_ADMIN_KEY'}")
     site_user, site_pass, _ = _auth_config()
     if site_user and site_pass:
-        print(f"Site login is ON for user '{site_user}' - password is DESK_PASS in .env")
+        print(f"Site login applies to public links only (user '{site_user}'); localhost needs no login")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

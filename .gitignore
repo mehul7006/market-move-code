@@ -11,3 +11,9 @@ api.json
 proof-ui-*.png
 .research/
 proof.json
+
+# generated reports / exports (re-create with backtest_60d.py or the Generate calls CSV buttons)
+all_calls_*.csv
+calls_60d.csv
+calls_60d.html
+backtest_60d_result.json
