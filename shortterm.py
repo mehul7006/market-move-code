@@ -194,7 +194,7 @@ def _round(x, nd=2):
     return None if x is None else round(x, nd)
 
 
-def _trade(cs, i, sign, p, fine=None, fine_t=None):
+def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     """Walk the path after the entry candle and return the call outcome fields.
 
     The path is the real 1-minute candles when they are available for the whole window (so we know
@@ -210,13 +210,22 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None):
     while end + 1 < n and cs[end + 1]["t"] <= deadline and _day(cs[end + 1]["t"]) == _day(cs[i]["t"]):
         end += 1
     te = cs[i]["t"] + tf * 60                 # entry = close of the signal candle
-    wend = cs[end]["t"] + tf * 60
+    # full scoring window = signal candle + horizon candles, capped at the close. Open calls are tracked all the
+    # way to "now" on the 1-minute path INCLUDING the still-forming minute, so a touch counts the moment the
+    # minute's high/low reaches a level, without waiting for any candle to complete.
+    wfull = min(cs[i]["t"] + (p["horizon"] + 1) * tf * 60, day_start + 930 * 60)
+    covered_to = cs[end]["t"] + tf * 60
     path, step, res = cs[i + 1:end + 1], tf * 60, "%sm" % tf
     if fine and tf > 1:
-        a, b = bisect.bisect_left(fine_t, te), bisect.bisect_left(fine_t, wend)
-        need = (wend - te) // 60
-        if need > 0 and (b - a) >= 0.9 * need:
+        a, b = bisect.bisect_left(fine_t, te), bisect.bisect_left(fine_t, wfull)
+        avail_end = min(wfull, fine_t[b - 1] + 60) if b > a else te
+        need = (avail_end - te) // 60
+        if need > 0 and (b - a) >= 0.9 * need and avail_end >= covered_to:
             path, step, res = fine[a:b], 60, "1m"
+    elif fine and tf == 1:                    # fine = the forming 1-minute candle(s) after the last completed one
+        tail = [c for c in fine if c["t"] > cs[end]["t"] and c["t"] <= wfull - 60 and _day(c["t"]) == _day(cs[i]["t"])]
+        if tail:
+            path = path + tail
     stopped, maxhit, stop_t, hit_t = False, 0, None, {}
     mfe = 0.0
     planstop, planopen, plan_pts, plan_alive = -sl, [[t1, 1 / 3], [t2, 1 / 3], [t3, 1 / 3]], 0.0, True
@@ -256,7 +265,8 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None):
                 if not planopen:
                     plan_alive, plan_end_t, plan_reason = False, c["t"], "All three targets booked"
     complete = ((end + 1 < n) or cs[end]["t"] >= deadline
-                or cs[end]["t"] + tf * 60 >= day_start + 930 * 60)
+                or cs[end]["t"] + tf * 60 >= day_start + 930 * 60
+                or (now is not None and now >= wfull))
     resolved = stopped or maxhit == 3
     last = ((path[-1]["close"] if path else cs[end]["close"]) - entry) * sign
     if not complete and not resolved:
@@ -278,6 +288,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None):
         return int((t - te) // 60 + step // 60) if t else None
     dec_t = stop_t if bucket == "SL" else hit_t.get(maxhit)
     return {"bucket": bucket, "endIdx": end, "mfe": _round(mfe, 1), "res": res,
+            "live": bool(path) and now is not None and (path[-1]["t"] + 60 > now if res == "1m" else False),
             "planPts": _round(plan_pts, 1), "t1Pts": _round(t1_pts, 1),
             "t1At": hit_t.get(1), "t2At": hit_t.get(2), "t3At": hit_t.get(3), "slAt": stop_t,
             "t1After": after(hit_t.get(1)), "t2After": after(hit_t.get(2)), "t3After": after(hit_t.get(3)),
@@ -287,7 +298,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None):
                 -sl if bucket == "SL" else {1: t1, 2: t2, 3: t3}.get(maxhit, last)), 2)}
 
 
-def replay(cs, p, since_ts=None, fine=None):
+def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
     """Every call strategy `p` would have issued on `cs` (completed candles of p['tf'] minutes).
     `fine` = real 1-minute candles used to decide which level came first."""
     tf = p["tf"]
@@ -295,22 +306,25 @@ def replay(cs, p, since_ts=None, fine=None):
         return []
     F = _features(cs)
     fine_t = [c["t"] for c in fine] if fine else None
-    out, blocked, per_day = [], -1, collections.Counter()
+    out, blocked_t, per_day = [], -1, collections.Counter()
     lookback = max(1, 60 // tf)
-    for i in range(60, len(cs) - 1):
-        if i <= blocked:
+    # the latest completed candle may itself be a signal, so a fresh call appears as soon as its candle closes
+    for i in range(60, len(cs)):
+        if cs[i]["t"] <= blocked_t:            # one trade at a time: wait for the previous window to end
             continue
         if since_ts and cs[i]["t"] < since_ts:
             continue
+        if until_ts and cs[i]["t"] >= until_ts:
+            break
         s = _signal(cs, F, i, p)
         if not s:
             continue
         d = _day(cs[i]["t"])
         if per_day[d] >= p["maxPerDay"]:
             continue
-        tr = _trade(cs, i, s, p, fine, fine_t)
+        tr = _trade(cs, i, s, p, fine, fine_t, now)
         per_day[d] += 1
-        blocked = tr["endIdx"]
+        blocked_t = cs[i]["t"] + p["horizon"] * tf * 60
         e = cs[i]["close"]
         stamp = datetime.datetime.fromtimestamp(cs[i]["t"] + 19800, datetime.timezone.utc)
         bull, bear = patterns(cs, i, F["atr"][i])
@@ -330,6 +344,7 @@ def replay(cs, p, since_ts=None, fine=None):
             "slAfter": tr["slAfter"], "planExitAt": tr["planExitAt"], "planReason": tr["planReason"],
             "planExitAfter": tr["planExitAfter"],
             "exit": tr["exit"], "mfe": tr["mfe"], "planPts": tr["planPts"], "t1ExitPts": tr["t1Pts"],
+            "live": tr["live"], "id": "%s-%s-%s" % (p["seg"], tf, cs[i]["t"]),
             "preRun": _round((e - cs[i - lookback]["close"]) * s, 1),
             "patterns": sorted(set(mine)),
         })
@@ -404,6 +419,9 @@ def _usable(cands, tf, now):
     return out
 
 
+_HIST = {}   # (segment, tf, IST day) -> calls of earlier days; they can no longer change, so compute once a day
+
+
 def build(candles_by_tf, days=60, now=None, futures=None):
     """candles_by_tf: {tf_minutes: {segment: [candles]}}. Returns the API payload with one block per candle size."""
     now = now or time.time()
@@ -434,10 +452,17 @@ def build(candles_by_tf, days=60, now=None, futures=None):
                        familyLabel="VWAP reclaim in a trend" if p["family"] == "vwapx" else "Trend pullback resume",
                        ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"]},
                        horizonMin=p["horizonMin"])
-            fine = None
-            if tf > 1:
-                fine = _usable((candles_by_tf.get(1) or {}).get(seg) or [], 1, now) or None
-            calls = replay(cs, p, fine=fine)
+            raw1 = (candles_by_tf.get(1) or {}).get(seg) or []
+            live1 = [c for c in raw1 if c["t"] <= now]                       # includes the forming minute
+            fine = live1 if tf > 1 else [c for c in live1 if c["t"] + 60 > now]
+            fine = fine or None
+            today0 = int(now - ((now + 19800) % 86400))
+            hkey = (seg, tf, today0)
+            if hkey not in _HIST:
+                _HIST[hkey] = replay(cs, p, fine=fine, now=now, until_ts=today0)
+                for k in [k for k in _HIST if k[2] != today0]:
+                    _HIST.pop(k, None)
+            calls = _HIST[hkey] + replay(cs, p, since_ts=today0, fine=fine, now=now)
             since = cs[-1]["t"] - days * 86400
             recent = [r for r in calls if r["t"] >= since]
             older = [r for r in calls if r["t"] < since]

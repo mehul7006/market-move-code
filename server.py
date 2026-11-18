@@ -470,7 +470,7 @@ def _hist_1m(inst):
 
     rows = {c["t"]: c for c in cached(f"hist1m:{inst['id']}", 1800, fetch)}
     try:
-        for c in cached(f"intra1m:{inst['id']}", 10, lambda: UX.intraday(inst["key"], "minutes", 1)):
+        for c in cached(f"intra1m:{inst['id']}", 3, lambda: UX.intraday(inst["key"], "minutes", 1)):
             rows[c["t"]] = c
     except Exception:
         pass
@@ -583,32 +583,87 @@ def _day_ist(t):
     return int(t + 19800) // 86400
 
 
+_short_lock = threading.Lock()
+
+
+def _inject_ltp(cmap1, quotes, now):
+    """Fold the latest real traded price into the forming 1-minute candle, so a level touched in the last seconds
+    counts even if the candle feed lags. Only while the market is open and the quote is fresh."""
+    live = {}
+    minute0 = int(now // 60 * 60)
+    for pid, rows in list(cmap1.items()):
+        inst = next(x for x in INSTRUMENTS if x["id"] == pid)
+        q = (quotes or {}).get(inst["key"]) or {}
+        ltp = q.get("last")
+        try:
+            qat = int(q.get("quoteAt")) / 1000.0
+        except (TypeError, ValueError):
+            qat = 0
+        live[pid] = {"last": ltp, "at": int(qat) if qat else None, "fresh": bool(ltp and now - qat < 120)}
+        if not (market_open() and ltp and now - qat < 120 and rows):
+            continue
+        rows = list(rows)
+        last = rows[-1]
+        if last["t"] == minute0:
+            rows[-1] = dict(last, high=max(last["high"], ltp), low=min(last["low"], ltp), close=ltp)
+        elif last["t"] < minute0:
+            rows.append({"t": minute0, "open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": 0, "liveTick": True})
+        cmap1[pid] = rows
+    return live
+
+
 def build_short(days=60):
-    """Short-term page payload (shortterm.py): 1m / 5m / 15m / 30m. Real Upstox candles only."""
+    """Short-term page payload (shortterm.py): 1m / 5m / 15m / 30m. Real Upstox candles only. Open calls are
+    tracked live, including the still-forming minute, so a touch counts the moment price reaches a level."""
     def make():
         cmap = {1: {}, 5: {}, 15: {}, 30: {}}
         errors = {}
-        for pid in shortterm.SEGMENTS:
+
+        def fetch_one(pid):                    # the four indices are independent: fetch them in parallel
             inst = next(x for x in INSTRUMENTS if x["id"] == pid)
+            out = {"pid": pid, "base5": None, "m1": None, "e5": None, "e1": None}
             try:
-                base5 = _audit_candles(inst)
-                cmap[5][pid] = base5
-                cmap[15][pid] = shortterm.resample(base5, 15)
-                cmap[30][pid] = shortterm.resample(base5, 30)
+                out["base5"] = _audit_candles(inst)
             except Exception as exc:
-                errors[pid] = str(exc)
+                out["e5"] = str(exc)
             try:
-                cmap[1][pid] = _hist_1m(inst)
+                out["m1"] = _hist_1m(inst)
             except Exception as exc:
-                errors.setdefault(pid + "/1m", str(exc))
-        res = shortterm.build(cmap, days=days, futures=_futures_context())
+                out["e1"] = str(exc)
+            return out
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            fut_ctx = pool.submit(_futures_context)
+            for o in pool.map(fetch_one, list(shortterm.SEGMENTS)):
+                pid = o["pid"]
+                if o["base5"] is not None:
+                    cmap[5][pid] = o["base5"]
+                    cmap[15][pid] = shortterm.resample(o["base5"], 15)
+                    cmap[30][pid] = shortterm.resample(o["base5"], 30)
+                else:
+                    errors[pid] = o["e5"]
+                if o["m1"] is not None:
+                    cmap[1][pid] = o["m1"]
+                else:
+                    errors.setdefault(pid + "/1m", o["e1"])
+            futures_ctx = fut_ctx.result()
+        now = time.time()
+        try:
+            quotes = cached("quotes", 2.5, lambda: UX.quotes([i["key"] for i in INSTRUMENTS]))
+        except Exception:
+            quotes = {}
+        ltps = _inject_ltp(cmap[1], quotes, now)
+        res = shortterm.build(cmap, days=days, now=now, futures=futures_ctx)
+        res["ltp"] = ltps
+        res["marketOpen"] = market_open()
+        res["serverTime"] = now
         for blk in res["timeframes"].values():
             for seg in blk["segments"]:
                 err = errors.get(seg["id"]) or (errors.get(seg["id"] + "/1m") if blk["tf"] == 1 else None)
                 if err:
                     seg["error"] = err
         return res
-    return cached(f"short:{days}", 15, make)
+    with _short_lock:                      # single flight: concurrent pollers share one computation
+        return cached(f"short:{days}", 4, make)
 
 
 def _short_csv(res, tf="all"):
@@ -833,7 +888,7 @@ def _intraday(inst):
         # tag-based count keeps the provenance label after the filled bars are cached
         yahoo_fill = sum(1 for c in rows[-150:] if c.get("src") == "YAHOO")
         return {"rows": rows, "yahooFill": yahoo_fill}
-    return cached(f"intra:{inst['id']}", 20, fetch)
+    return cached(f"intra:{inst['id']}", 8, fetch)
 
 
 def _daily(inst):

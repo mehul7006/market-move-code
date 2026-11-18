@@ -1080,23 +1080,55 @@ let shortFilter = "all";
 let shortData = null;
 let shortTf = "5";
 
-function openShort() {
-  $("shortModal").classList.remove("hidden");
+let shortTimer = null;
+let shortBusy = false;
+
+function loadShort(silent) {
+  if (shortBusy) return Promise.resolve();
+  shortBusy = true;
   const body = $("shortBody");
-  body.innerHTML = `<div class="loading"><span class="spinner"></span> Loading real 1m / 5m candles and replaying
-    each index's tested strategy… (the first load after a restart can take ~30 s)</div>`;
-  fetch("/api/short")
+  return fetch("/api/short")
     .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-    .then((d) => { shortData = d; renderShort(); })
+    .then((d) => {
+      shortData = d;
+      const modal = $("shortModal").querySelector(".modal");
+      const top = modal ? modal.scrollTop : 0;
+      const wraps = [...document.querySelectorAll("#shortBody .table-wrap")].map((w) => w.scrollTop);
+      renderShort();
+      if (silent) {                                  // keep the reader's place across live refreshes
+        if (modal) modal.scrollTop = top;
+        document.querySelectorAll("#shortBody .table-wrap").forEach((w, i) => { if (wraps[i] != null) w.scrollTop = wraps[i]; });
+      }
+    })
     .catch((e) => {
+      if (silent && shortData) return;               // keep showing the last good data on a blip
       body.innerHTML = `<div class="error-state"><div class="big">SHORT-TERM CALLS UNAVAILABLE</div>
         <div class="why">${esc(e.message)}</div>
         <div class="fix">Needs a valid Upstox token. This page uses real candles only — on a feed
           failure it shows this error, never filled-in calls.</div></div>`;
-    });
+    })
+    .finally(() => { shortBusy = false; });
 }
 
-function closeShort() { $("shortModal").classList.add("hidden"); }
+function openShort() {
+  $("shortModal").classList.remove("hidden");
+  $("shortBody").innerHTML = `<div class="loading"><span class="spinner"></span> Loading real 1m / 5m candles and replaying
+    each index's tested strategy… (the first load after a restart can take ~30 s)</div>`;
+  loadShort(false);
+  clearInterval(shortTimer);
+  // live tracking: re-check every 5 s while the market is open, using the still-forming minute and the latest price
+  shortTimer = setInterval(() => {
+    if ($("shortModal").classList.contains("hidden") || document.hidden) return;
+    if (shortData && shortData.marketOpen === false && Date.now() / 1000 - shortData.serverTime < 300) return;
+    loadShort(true);
+  }, 5000);
+}
+
+function closeShort() {
+  $("shortModal").classList.add("hidden");
+  clearInterval(shortTimer);
+  shortTimer = null;
+}
 
 function shortBadge(r) {
   const cls = { SL: "pf-sl", T1: "pf-t1", T2: "pf-t1", T3: "pf-t1", OPEN: "pf-open", TIMEOUT: "pf-timeout" }[r] || "";
@@ -1187,13 +1219,49 @@ function renderShort() {
   }).join("");
 
   const active = blk.active || [];
-  const activeHtml = active.length
-    ? `<div class="proof-card"><div class="pf-h">Live — open ${shortTf}m call${active.length > 1 ? "s" : ""}</div>
-      ${active.map((r) => `<div class="pf-note"><b>${esc(r.segment)} ${r.side}</b> from ${esc(r.time)} IST at ${fmt(r.entry)} ·
-        SL ${fmt(r.sl)} · T1 ${fmt(r.t1)} · T2 ${fmt(r.t2)} · T3 ${fmt(r.t3)}
-        ${r.patterns && r.patterns.length ? "· " + esc(r.patterns.join(", ")) : ""} — tracked on real candles</div>`).join("")}</div>`
-    : `<div class="proof-card"><div class="pf-h">Live — ${shortTf}m</div><div class="pf-note">No open ${shortTf}m call right now.
-        The rules stand aside until a validated setup completes (entries 09:25–14:15 IST, max 3 per index per day).</div></div>`;
+  const ltpOf = (seg) => ((d.ltp || {})[seg] || {});
+  const need = (r, lvl, kind) => {            // points still needed (or room left before the stop)
+    const l = ltpOf(r.segment).last;
+    if (l == null) return "—";
+    const dir = r.side === "BUY" ? 1 : -1;
+    const dist = kind === "sl" ? (l - lvl) * dir : (lvl - l) * dir;
+    return (dist >= 0 ? dist.toFixed(1) : "passed") + (dist >= 0 ? " pts" : "");
+  };
+  const stat = (r, lvl, at, kind) => at
+    ? `<span class="${kind === "sl" ? "neg" : "pos"}">✓ touched ${todayClock(at)}</span>`
+    : `<span class="fcs">${kind === "sl" ? "room " : "needs "}${need(r, lvl, kind)}</span>`;
+  const liveChip = d.marketOpen
+    ? `<span class="fc-badge pos">● LIVE · re-checked every 5 s · ${todayClock(d.serverTime)} IST</span>`
+    : `<span class="fc-badge">market closed · last data ${todayClock(d.serverTime)} IST</span>`;
+  const ltpStrip = Object.entries(d.ltp || {}).map(([seg, v]) =>
+    `<span class="fc-badge">${esc(seg)} ${v.last == null ? "—" : fmt(v.last)}${v.fresh ? "" : " (stale)"}</span>`).join(" ");
+  const activeHtml = `<div class="proof-card">
+      <div class="pf-h">Live tracker — open ${isAll ? "" : shortTf + "m "}calls ${liveChip}</div>
+      <div class="pf-note">${ltpStrip}</div>
+      ${active.length ? `<div class="table-wrap"><table class="research pf-table">
+        <thead><tr><th>Index · candle</th><th>Side · entry</th><th>Price now</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th>
+          <th>Open for</th></tr></thead><tbody>
+        ${active.map((r) => {
+          const lp = ltpOf(r.segment).last;
+          const mins = Math.max(0, Math.round((d.serverTime - r.entryAt) / 60));
+          return `<tr>
+            <td class="name">${esc(r.segment)} · ${r.tf}m</td>
+            <td>${r.side === "BUY" ? '<span class="pos">▲ BUY</span>' : '<span class="neg">▼ SELL</span>'}
+              <div class="fcs">${fmt(r.entry)} · from ${todayClock(r.entryAt)}</div></td>
+            <td class="num">${lp == null ? "—" : fmt(lp)}</td>
+            <td class="num neg">${fmt(r.sl)}<div class="fcs">${stat(r, r.sl, r.slAt, "sl")}</div></td>
+            <td class="num pos">${fmt(r.t1)}<div class="fcs">${stat(r, r.t1, r.t1At, "t")}</div></td>
+            <td class="num">${fmt(r.t2)}<div class="fcs">${stat(r, r.t2, r.t2At, "t")}</div></td>
+            <td class="num">${fmt(r.t3)}<div class="fcs">${stat(r, r.t3, r.t3At, "t")}</div></td>
+            <td class="num">${mins} min<div class="fcs">window ${r.tf === 1 ? "1-2 h" : "up to 2 h"}</div></td>
+          </tr>`;
+        }).join("")}</tbody></table></div>`
+      : `<div class="pf-note">No open ${isAll ? "" : shortTf + "m "}call right now. A new call appears within seconds of its candle
+        closing (entries 09:25–14:15 IST, max 3 per index per day).</div>`}
+      <div class="pf-note">Every open call is checked against the still-forming 1-minute candle and the latest traded price, so a
+        level counts the moment price touches it — you do not wait for a candle to close. If a minute touches both SL and a
+        target and the order cannot be known, it is scored as the SL.</div>
+    </div>`;
 
   const labels = { signal: "Signal", window: "Window", buckets: "Outcome buckets", plan: "Plan points", risk: "Risk / payoff",
     patterns: "Candlestick patterns", volumeOi: "Volume & OI", honesty: "Honest caveat" };
