@@ -1,0 +1,778 @@
+{
+ "generatedAt": 1795017710,
+ "testMonths": [
+  "2026-07",
+  "2026-08",
+  "2026-09",
+  "2026-10",
+  "2026-11"
+ ],
+ "rows": [
+  {
+   "segment": "NIFTY",
+   "tf": 1,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "pullback/trend T1 3 SL 9",
+     "historyWin": 78.7,
+     "calls": 60,
+     "winRate": 71.7
+    },
+    {
+     "month": "2026-08",
+     "pick": "pullback/trend T1 3 SL 7",
+     "historyWin": 71.4,
+     "calls": 60,
+     "winRate": 73.3
+    },
+    {
+     "month": "2026-09",
+     "pick": "pullback/trend T1 3 SL 7",
+     "historyWin": 72.0,
+     "calls": 60,
+     "winRate": 63.3
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 3 SL 7",
+     "historyWin": 70.6,
+     "calls": 24,
+     "winRate": 66.7
+    },
+    {
+     "month": "2026-11",
+     "pick": "pullback/trend T1 3 SL 11",
+     "historyWin": 78.2,
+     "calls": 32,
+     "winRate": 81.2
+    }
+   ],
+   "oos": {
+    "calls": 236,
+    "SL": 69,
+    "T1": 84,
+    "T2": 17,
+    "T3": 66,
+    "timeouts": 0,
+    "open": 0,
+    "slRate": 29.2,
+    "t1Rate": 35.6,
+    "t2Rate": 7.2,
+    "t3Rate": 28.0,
+    "winRate": 70.8,
+    "avgPlanPts": 0.8,
+    "totalPlanPts": 183.0,
+    "avgT1ExitPts": -0.2,
+    "avgWinPts": 4.3,
+    "avgLossPts": 7.8,
+    "profitFactor": 1.34,
+    "medianT1Min": 1,
+    "medianPreRun": 31.4
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "NIFTY",
+   "tf": 5,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "vwapx/strong T1 8 SL 20",
+     "historyWin": 80.3,
+     "calls": 29,
+     "winRate": 72.4
+    },
+    {
+     "month": "2026-08",
+     "pick": "vwapx/strong T1 8 SL 20",
+     "historyWin": 78.1,
+     "calls": 21,
+     "winRate": 81.0
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/trend T1 15 SL 25",
+     "historyWin": 70.3,
+     "calls": 27,
+     "winRate": 85.2
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 15 SL 25",
+     "historyWin": 72.7,
+     "calls": 14,
+     "winRate": 57.1
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/strong T1 15 SL 25",
+     "historyWin": 71.3,
+     "calls": 14,
+     "winRate": 78.6
+    }
+   ],
+   "oos": {
+    "calls": 105,
+    "SL": 25,
+    "T1": 34,
+    "T2": 8,
+    "T3": 38,
+    "timeouts": 0,
+    "open": 0,
+    "slRate": 23.8,
+    "t1Rate": 32.4,
+    "t2Rate": 7.6,
+    "t3Rate": 36.2,
+    "winRate": 76.2,
+    "avgPlanPts": 4.2,
+    "totalPlanPts": 440.6,
+    "avgT1ExitPts": 3.5,
+    "avgWinPts": 12.6,
+    "avgLossPts": 22.6,
+    "profitFactor": 1.78,
+    "medianT1Min": 4,
+    "medianPreRun": 26.3
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "NIFTY",
+   "tf": 15,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "pullback/strong T1 13 SL 44",
+     "historyWin": 78.0,
+     "calls": 14,
+     "winRate": 57.1
+    },
+    {
+     "month": "2026-08",
+     "pick": "vwapx/strong T1 13 SL 44",
+     "historyWin": 77.1,
+     "calls": 20,
+     "winRate": 75.0
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/strong T1 17 SL 44",
+     "historyWin": 71.8,
+     "calls": 20,
+     "winRate": 55.0
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/trend T1 13 SL 44",
+     "historyWin": 75.6,
+     "calls": 12,
+     "winRate": 66.7
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/trend T1 13 SL 35",
+     "historyWin": 71.3,
+     "calls": 10,
+     "winRate": 100.0
+    }
+   ],
+   "oos": {
+    "calls": 76,
+    "SL": 20,
+    "T1": 36,
+    "T2": 7,
+    "T3": 9,
+    "timeouts": 4,
+    "open": 0,
+    "slRate": 26.3,
+    "t1Rate": 47.4,
+    "t2Rate": 9.2,
+    "t3Rate": 11.8,
+    "winRate": 68.4,
+    "avgPlanPts": -2.6,
+    "totalPlanPts": -196.9,
+    "avgT1ExitPts": -2.5,
+    "avgWinPts": 13.4,
+    "avgLossPts": 41.9,
+    "profitFactor": 0.79,
+    "medianT1Min": 9,
+    "medianPreRun": 10.6
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "BANKNIFTY",
+   "tf": 1,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "vwapx/strong T1 9 SL 19",
+     "historyWin": 76.9,
+     "calls": 35,
+     "winRate": 65.7
+    },
+    {
+     "month": "2026-08",
+     "pick": "vwapx/strong T1 9 SL 32",
+     "historyWin": 81.6,
+     "calls": 33,
+     "winRate": 78.8
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/strong T1 9 SL 32",
+     "historyWin": 80.8,
+     "calls": 30,
+     "winRate": 80.0
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 9 SL 32",
+     "historyWin": 80.7,
+     "calls": 32,
+     "winRate": 71.9
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/trend T1 9 SL 32",
+     "historyWin": 79.6,
+     "calls": 21,
+     "winRate": 76.2
+    }
+   ],
+   "oos": {
+    "calls": 151,
+    "SL": 39,
+    "T1": 43,
+    "T2": 16,
+    "T3": 53,
+    "timeouts": 0,
+    "open": 0,
+    "slRate": 25.8,
+    "t1Rate": 28.5,
+    "t2Rate": 10.6,
+    "t3Rate": 35.1,
+    "winRate": 74.2,
+    "avgPlanPts": 2.3,
+    "totalPlanPts": 348.6,
+    "avgT1ExitPts": -0.6,
+    "avgWinPts": 12.9,
+    "avgLossPts": 28.0,
+    "profitFactor": 1.32,
+    "medianT1Min": 1,
+    "medianPreRun": 106.1
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "BANKNIFTY",
+   "tf": 5,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "pullback/trend T1 28 SL 56",
+     "historyWin": 71.1,
+     "calls": 44,
+     "winRate": 56.8
+    },
+    {
+     "month": "2026-08",
+     "pick": "vwapx/strong T1 28 SL 70",
+     "historyWin": 71.3,
+     "calls": 22,
+     "winRate": 90.9
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/strong T1 28 SL 70",
+     "historyWin": 75.0,
+     "calls": 19,
+     "winRate": 63.2
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/trend T1 28 SL 56",
+     "historyWin": 70.5,
+     "calls": 28,
+     "winRate": 75.0
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/strong T1 21 SL 42",
+     "historyWin": 70.7,
+     "calls": 14,
+     "winRate": 78.6
+    }
+   ],
+   "oos": {
+    "calls": 127,
+    "SL": 38,
+    "T1": 45,
+    "T2": 13,
+    "T3": 31,
+    "timeouts": 0,
+    "open": 0,
+    "slRate": 29.9,
+    "t1Rate": 35.4,
+    "t2Rate": 10.2,
+    "t3Rate": 24.4,
+    "winRate": 70.1,
+    "avgPlanPts": 0.3,
+    "totalPlanPts": 38.1,
+    "avgT1ExitPts": 1.6,
+    "avgWinPts": 25.3,
+    "avgLossPts": 58.2,
+    "profitFactor": 1.02,
+    "medianT1Min": 4,
+    "medianPreRun": 48.9
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "BANKNIFTY",
+   "tf": 15,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "vwapx/trend T1 73 SL 121",
+     "historyWin": 73.3,
+     "calls": 19,
+     "winRate": 52.6
+    },
+    {
+     "month": "2026-08",
+     "pick": "vwapx/strong T1 48 SL 121",
+     "historyWin": 72.6,
+     "calls": 19,
+     "winRate": 63.2
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/strong T1 36 SL 97",
+     "historyWin": 72.8,
+     "calls": 14,
+     "winRate": 85.7
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 36 SL 97",
+     "historyWin": 74.5,
+     "calls": 17,
+     "winRate": 52.9
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/strong T1 36 SL 97",
+     "historyWin": 71.5,
+     "calls": 13,
+     "winRate": 84.6
+    }
+   ],
+   "oos": {
+    "calls": 82,
+    "SL": 23,
+    "T1": 33,
+    "T2": 8,
+    "T3": 13,
+    "timeouts": 5,
+    "open": 0,
+    "slRate": 28.0,
+    "t1Rate": 40.2,
+    "t2Rate": 9.8,
+    "t3Rate": 15.9,
+    "winRate": 65.9,
+    "avgPlanPts": 3.7,
+    "totalPlanPts": 299.7,
+    "avgT1ExitPts": -2.7,
+    "avgWinPts": 55.2,
+    "avgLossPts": 95.8,
+    "profitFactor": 1.11,
+    "medianT1Min": 10,
+    "medianPreRun": 31.4
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "SENSEX",
+   "tf": 1,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "vwapx/strong T1 20 SL 34",
+     "historyWin": 71.7,
+     "calls": 32,
+     "winRate": 56.2
+    },
+    {
+     "month": "2026-08",
+     "pick": "pullback/strong T1 10 SL 34",
+     "historyWin": 74.8,
+     "calls": 53,
+     "winRate": 71.7
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/strong T1 10 SL 34",
+     "historyWin": 77.1,
+     "calls": 31,
+     "winRate": 71.0
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 10 SL 34",
+     "historyWin": 75.8,
+     "calls": 25,
+     "winRate": 72.0
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/strong T1 10 SL 34",
+     "historyWin": 75.3,
+     "calls": 19,
+     "winRate": 94.7
+    }
+   ],
+   "oos": {
+    "calls": 160,
+    "SL": 46,
+    "T1": 35,
+    "T2": 14,
+    "T3": 65,
+    "timeouts": 0,
+    "open": 0,
+    "slRate": 28.7,
+    "t1Rate": 21.9,
+    "t2Rate": 8.8,
+    "t3Rate": 40.6,
+    "winRate": 71.2,
+    "avgPlanPts": 1.8,
+    "totalPlanPts": 293.2,
+    "avgT1ExitPts": -1.5,
+    "avgWinPts": 16.3,
+    "avgLossPts": 34.0,
+    "profitFactor": 1.19,
+    "medianT1Min": 1,
+    "medianPreRun": 100.6
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "SENSEX",
+   "tf": 5,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "pullback/trend T1 45 SL 75",
+     "historyWin": 71.6,
+     "calls": 42,
+     "winRate": 71.4
+    },
+    {
+     "month": "2026-08",
+     "pick": "pullback/trend T1 45 SL 75",
+     "historyWin": 71.5,
+     "calls": 36,
+     "winRate": 47.2
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/strong T1 45 SL 75",
+     "historyWin": 70.5,
+     "calls": 20,
+     "winRate": 80.0
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 45 SL 75",
+     "historyWin": 71.8,
+     "calls": 17,
+     "winRate": 58.8
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/strong T1 45 SL 75",
+     "historyWin": 70.5,
+     "calls": 17,
+     "winRate": 82.4
+    }
+   ],
+   "oos": {
+    "calls": 132,
+    "SL": 44,
+    "T1": 29,
+    "T2": 15,
+    "T3": 43,
+    "timeouts": 1,
+    "open": 0,
+    "slRate": 33.3,
+    "t1Rate": 22.0,
+    "t2Rate": 11.4,
+    "t3Rate": 32.6,
+    "winRate": 65.9,
+    "avgPlanPts": 9.4,
+    "totalPlanPts": 1241.5,
+    "avgT1ExitPts": 4.4,
+    "avgWinPts": 52.5,
+    "avgLossPts": 74.0,
+    "profitFactor": 1.37,
+    "medianT1Min": 7,
+    "medianPreRun": 48.0
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "SENSEX",
+   "tf": 15,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "vwapx/strong T1 52 SL 130",
+     "historyWin": 71.9,
+     "calls": 21,
+     "winRate": 90.5
+    },
+    {
+     "month": "2026-08",
+     "pick": "vwapx/strong T1 52 SL 130",
+     "historyWin": 76.5,
+     "calls": 19,
+     "winRate": 78.9
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/strong T1 52 SL 130",
+     "historyWin": 76.9,
+     "calls": 19,
+     "winRate": 52.6
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/trend T1 52 SL 130",
+     "historyWin": 73.2,
+     "calls": 14,
+     "winRate": 71.4
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/trend T1 39 SL 130",
+     "historyWin": 78.0,
+     "calls": 11,
+     "winRate": 100.0
+    }
+   ],
+   "oos": {
+    "calls": 84,
+    "SL": 16,
+    "T1": 45,
+    "T2": 7,
+    "T3": 13,
+    "timeouts": 3,
+    "open": 0,
+    "slRate": 19.0,
+    "t1Rate": 53.6,
+    "t2Rate": 8.3,
+    "t3Rate": 15.5,
+    "winRate": 77.4,
+    "avgPlanPts": 18.6,
+    "totalPlanPts": 1559.6,
+    "avgT1ExitPts": 12.9,
+    "avgWinPts": 57.1,
+    "avgLossPts": 113.2,
+    "profitFactor": 1.72,
+    "medianT1Min": 9,
+    "medianPreRun": 55.8
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "NEXT50",
+   "tf": 1,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "vwapx/strong T1 11 SL 36",
+     "historyWin": 81.2,
+     "calls": 33,
+     "winRate": 90.9
+    },
+    {
+     "month": "2026-08",
+     "pick": "vwapx/strong T1 11 SL 36",
+     "historyWin": 85.2,
+     "calls": 34,
+     "winRate": 76.5
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/strong T1 11 SL 36",
+     "historyWin": 82.6,
+     "calls": 26,
+     "winRate": 73.1
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 11 SL 36",
+     "historyWin": 80.9,
+     "calls": 30,
+     "winRate": 76.7
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/strong T1 14 SL 36",
+     "historyWin": 75.4,
+     "calls": 16,
+     "winRate": 68.8
+    }
+   ],
+   "oos": {
+    "calls": 139,
+    "SL": 30,
+    "T1": 36,
+    "T2": 15,
+    "T3": 58,
+    "timeouts": 0,
+    "open": 0,
+    "slRate": 21.6,
+    "t1Rate": 25.9,
+    "t2Rate": 10.8,
+    "t3Rate": 41.7,
+    "winRate": 78.4,
+    "avgPlanPts": 7.0,
+    "totalPlanPts": 971.1,
+    "avgT1ExitPts": 1.1,
+    "avgWinPts": 18.8,
+    "avgLossPts": 36.0,
+    "profitFactor": 1.9,
+    "medianT1Min": 1,
+    "medianPreRun": 114.8
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "NEXT50",
+   "tf": 5,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "pullback/strong T1 24 SL 80",
+     "historyWin": 77.4,
+     "calls": 38,
+     "winRate": 84.2
+    },
+    {
+     "month": "2026-08",
+     "pick": "vwapx/strong T1 32 SL 80",
+     "historyWin": 70.2,
+     "calls": 22,
+     "winRate": 77.3
+    },
+    {
+     "month": "2026-09",
+     "pick": "vwapx/trend T1 32 SL 80",
+     "historyWin": 71.0,
+     "calls": 22,
+     "winRate": 77.3
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 32 SL 64",
+     "historyWin": 70.1,
+     "calls": 20,
+     "winRate": 65.0
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/trend T1 24 SL 80",
+     "historyWin": 76.2,
+     "calls": 12,
+     "winRate": 91.7
+    }
+   ],
+   "oos": {
+    "calls": 114,
+    "SL": 24,
+    "T1": 39,
+    "T2": 16,
+    "T3": 35,
+    "timeouts": 0,
+    "open": 0,
+    "slRate": 21.1,
+    "t1Rate": 34.2,
+    "t2Rate": 14.0,
+    "t3Rate": 30.7,
+    "winRate": 78.9,
+    "avgPlanPts": 14.1,
+    "totalPlanPts": 1613.0,
+    "avgT1ExitPts": 6.4,
+    "avgWinPts": 38.0,
+    "avgLossPts": 75.3,
+    "profitFactor": 1.89,
+    "medianT1Min": 3,
+    "medianPreRun": 85.2
+   },
+   "monthsTraded": 5
+  },
+  {
+   "segment": "NEXT50",
+   "tf": 15,
+   "picks": [
+    {
+     "month": "2026-07",
+     "pick": "vwapx/strong T1 55 SL 111",
+     "historyWin": 70.4,
+     "calls": 17,
+     "winRate": 76.5
+    },
+    {
+     "month": "2026-08",
+     "pick": "pullback/strong T1 55 SL 111",
+     "historyWin": 71.4,
+     "calls": 26,
+     "winRate": 38.5
+    },
+    {
+     "month": "2026-09",
+     "pick": null
+    },
+    {
+     "month": "2026-10",
+     "pick": "vwapx/strong T1 55 SL 111",
+     "historyWin": 70.0,
+     "calls": 15,
+     "winRate": 60.0
+    },
+    {
+     "month": "2026-11",
+     "pick": "vwapx/trend T1 55 SL 138",
+     "historyWin": 70.8,
+     "calls": 6,
+     "winRate": 100.0
+    }
+   ],
+   "oos": {
+    "calls": 64,
+    "SL": 22,
+    "T1": 22,
+    "T2": 6,
+    "T3": 10,
+    "timeouts": 4,
+    "open": 0,
+    "slRate": 34.4,
+    "t1Rate": 34.4,
+    "t2Rate": 9.4,
+    "t3Rate": 15.6,
+    "winRate": 59.4,
+    "avgPlanPts": -0.3,
+    "totalPlanPts": -21.4,
+    "avgT1ExitPts": -8.9,
+    "avgWinPts": 69.4,
+    "avgLossPts": 102.3,
+    "profitFactor": 0.99,
+    "medianT1Min": 10,
+    "medianPreRun": 60.4
+   },
+   "monthsTraded": 4
+  }
+ ],
+ "note": "Each month's strategy was picked using only earlier months; the month itself was unseen."
+}

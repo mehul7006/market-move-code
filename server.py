@@ -432,7 +432,7 @@ def build_recent_calls(days=30):
 
 
 def _hist_1m(inst):
-    """Real Upstox 1-minute history (~135 days, 27-day chunks), disk-cached per IST date, plus today."""
+    """Real Upstox 1-minute history (~189 days, 27-day chunks), disk-cached per IST date, plus today."""
     path = os.path.join(ROOT, ".candle_cache", f"hist1m_{inst['id']}.json")
 
     def fetch():
@@ -447,7 +447,7 @@ def _hist_1m(inst):
             pass
         rows = {}
         today = datetime.date.today()
-        for k in range(5):
+        for k in range(7):                       # ~189 days: enough for the 6-month scorecard window
             end = today - datetime.timedelta(days=27 * k + 1)
             start = end - datetime.timedelta(days=26)
             try:
@@ -469,12 +469,22 @@ def _hist_1m(inst):
         return bars
 
     rows = {c["t"]: c for c in cached(f"hist1m:{inst['id']}", 1800, fetch)}
+    # Today's bars only ever grow: a failed or short intraday fetch must never make already-seen minutes vanish
+    # (that would make today's calls flicker in and out).
+    store = _i1m_store.setdefault(inst["id"], {"day": None, "rows": {}})
+    stamp = str(_ist_today())
+    if store["day"] != stamp:
+        store["day"], store["rows"] = stamp, {}
     try:
         for c in cached(f"intra1m:{inst['id']}", 3, lambda: UX.intraday(inst["key"], "minutes", 1)):
-            rows[c["t"]] = c
+            store["rows"][c["t"]] = c
     except Exception:
         pass
+    rows.update(store["rows"])
     return [rows[t] for t in sorted(rows)]
+
+
+_i1m_store = {}
 
 
 _FUT_UNDER = {"NIFTY": ("NSE", "NSE_FO", "NIFTY"), "BANKNIFTY": ("NSE", "NSE_FO", "BANKNIFTY"),
@@ -666,6 +676,38 @@ def build_short(days=60):
         return cached(f"short:{days}", 4, make)
 
 
+_active_lock = threading.Lock()
+
+
+def build_active():
+    """Every call generated in the current (or last) session - long AND short term - with live status."""
+    import activecalls
+
+    def make():
+        now = time.time()
+        sh = build_short(60)
+        lt = build_today()
+        cmap1 = {}
+
+        def one(pid):
+            inst = next(x for x in INSTRUMENTS if x["id"] == pid)
+            try:
+                return pid, _hist_1m(inst)
+            except Exception:
+                return pid, []
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for pid, rows in pool.map(one, TRADEABLE_IDS):
+                cmap1[pid] = rows
+        try:
+            quotes = cached("quotes", 2.5, lambda: UX.quotes([i["key"] for i in INSTRUMENTS]))
+        except Exception:
+            quotes = {}
+        ltps = _inject_ltp(cmap1, quotes, now)
+        return activecalls.build(sh, lt, cmap1, ltps, FORECAST_PROFILES, PROFILE_BY_ID, now, market_open())
+    with _active_lock:
+        return cached("active", 3, make)
+
+
 def _short_csv(res, tf="all"):
     """Every short-term call with all levels and the clock time each one was touched (IST)."""
     def clock(t):
@@ -751,6 +793,28 @@ def _history(inst, days=30):
     return cached(f"hist:{inst['id']}:{days}", 1800, fetch)
 
 
+def _candles_days(inst, days):
+    """Real Upstox 5m bars over `days` calendar days (history chunks + today), without touching AUDIT_DAYS."""
+    rows = {}
+    try:
+        for c in _history(inst, days):
+            rows[c["t"]] = c
+    except Exception:
+        pass
+    for c in _intraday(inst)["rows"]:
+        rows[c["t"]] = c
+    return [rows[k] for k in sorted(rows)]
+
+
+_score_lock = threading.Lock()
+
+
+def build_scorecard():
+    import scorecard
+    with _score_lock:
+        return cached("scorecard", 600, lambda: scorecard.build(sys.modules[__name__]))
+
+
 def _audit_candles(inst):
     """Real 5m bars for the walk-forward audit (chart keeps only the recent slice)."""
     rows = {}
@@ -816,9 +880,17 @@ def _save_cached_candles(inst, rows):
 
 
 def _yahoo_5m(inst):
+    """Real Yahoo 5m bars used only to fill a lagging tail. Short timeout and a 60 s cache so a slow Yahoo can
+    never stall the dashboard (a failure simply means no fill, exactly as before)."""
     if not inst.get("yahoo"):
         return []
-    return yahoo.yahoo_chart(inst["yahoo"], "5d", "5m").get("candles") or []
+
+    def fetch():
+        try:
+            return yahoo.yahoo_chart(inst["yahoo"], "5d", "5m", timeout=5).get("candles") or []
+        except Exception:
+            return []
+    return cached(f"y5:{inst['yahoo']}", 60, fetch)
 
 
 def _intraday(inst):
@@ -1337,6 +1409,52 @@ def _build_one(inst, quotes, quote_error):
     }
 
 
+_mb = {"t": None, "b": b""}
+
+
+def _market_bytes(force=False):
+    """Serve the already-built market payload instantly (a background thread keeps it fresh). Only when nothing has
+    been built yet, or the copy is stale, does the request wait for a rebuild."""
+    data, t = _payload["data"], _payload["t"]
+    age = time.time() - t if data else None
+    if data is None or age > 120 or (force and age > 8):
+        data = build_market(force)
+    if _mb["t"] != _payload["t"]:
+        _mb["b"], _mb["t"] = json.dumps(data).encode("utf-8"), _payload["t"]
+    return _mb["b"]
+
+
+_last = {}
+
+
+def _remember(name, data):
+    _last[name] = (time.time(), data)
+    return data
+
+
+def _serve(name, builder, max_open=25, max_closed=300):
+    """Answer instantly from the latest finished build (the background thread keeps it fresh); only build in the
+    request when nothing is ready yet or the copy is too old."""
+    ent = _last.get(name)
+    if ent and time.time() - ent[0] < (max_open if market_open() else max_closed):
+        return ent[1]
+    return _remember(name, builder())
+
+
+def _background_refresher():
+    """Keep the dashboard and short-term data warm so opening the page never waits on Upstox / Yahoo."""
+    while True:
+        try:
+            build_market(force=True)
+            _remember("short", build_short(60))
+            _remember("active", build_active())
+            if time.time() - _last.get("score", (0,))[0] > 1800:          # heavy (6 months, 6 segments): every 30 min
+                _remember("score", build_scorecard())
+        except Exception:
+            pass
+        time.sleep(3 if market_open() else 30)
+
+
 def build_market(force=False):
     global _payload
     _sync_token_from_env()
@@ -1736,6 +1854,14 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _send(self, code, body, ctype, extra=None):
+        extra = dict(extra or {})
+        if (len(body) > 1400 and "gzip" in (self.headers.get("Accept-Encoding") or "")
+                and (ctype.startswith("application/json") or ctype.startswith("text/")
+                     or "javascript" in ctype or "svg" in ctype)):
+            import gzip
+            body = gzip.compress(body, 5)               # ~650 KB of market JSON -> ~100 KB over the tunnel
+            extra["Content-Encoding"] = "gzip"
+            extra["Vary"] = "Accept-Encoding"
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -1751,6 +1877,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(parsed.query)
+        if parsed.path == "/favicon.ico":
+            self.send_response(204)
+            self.send_header("Cache-Control", "max-age=86400")
+            self.end_headers()
+            return
         if parsed.path == "/api/token":
             if not self._admin():
                 return
@@ -1763,8 +1894,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/market":
             try:
-                body = json.dumps(build_market("1" in qs.get("force", []))).encode("utf-8")
-                self._send(200, body, "application/json; charset=utf-8")
+                self._send(200, _market_bytes("1" in qs.get("force", [])), "application/json; charset=utf-8")
             except Exception as exc:
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
@@ -1793,10 +1923,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
 
+        if parsed.path == "/api/active":
+            try:
+                self._send(200, json.dumps(_serve("active", build_active)).encode("utf-8"), "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+            return
+
+        if parsed.path == "/api/scorecard":
+            try:
+                res = _serve("score", build_scorecard, 3600, 3600)
+                if qs.get("format", ["json"])[0] == "csv":
+                    import scorecard
+                    self._send(200, scorecard.to_csv(res).encode("utf-8"), "text/csv; charset=utf-8",
+                               {"Content-Disposition": 'attachment; filename="scorecard.csv"'})
+                    return
+                self._send(200, json.dumps(res).encode("utf-8"), "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+            return
+
         if parsed.path == "/api/short":
             try:
                 days = max(5, min(150, int(qs.get("days", ["60"])[0] or 60)))
-                res = build_short(days)
+                res = _serve("short", lambda: build_short(60)) if days == 60 else build_short(days)
                 if qs.get("format", ["json"])[0] == "csv":
                     tf = qs.get("tf", ["all"])[0]
                     self._send(200, _short_csv(res, tf).encode("utf-8"), "text/csv; charset=utf-8",
@@ -1931,6 +2081,7 @@ def main():
     site_user, site_pass, _ = _auth_config()
     if site_user and site_pass:
         print(f"Site login applies to public links only (user '{site_user}'); localhost needs no login")
+    threading.Thread(target=_background_refresher, daemon=True, name="market-refresher").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

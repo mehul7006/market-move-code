@@ -52,6 +52,7 @@ async function load(force) {
     const r = await fetch("/api/market" + (force ? "?force=1" : ""));
     if (!r.ok) throw new Error("HTTP " + r.status);
     state.data = await r.json();
+    state.lastLoad = Date.now();
     render();
   } catch (e) {
     $("feedNotes").innerHTML = `<div class="note err">Dashboard server unreachable (${esc(e.message)}).
@@ -62,7 +63,12 @@ async function load(force) {
 function setAuto(on) {
   state.auto = on;
   clearInterval(state.timer);
-  if (on) state.timer = setInterval(() => { if (!document.hidden) load(false); }, 5000);
+  // every 5 s while the market is open; when it is closed nothing moves, so ask only every 30 s
+  if (on) state.timer = setInterval(() => {
+    if (document.hidden) return;
+    if (state.data && state.data.marketOpen === false && Date.now() - (state.lastLoad || 0) < 30000) return;
+    load(false);
+  }, 5000);
 }
 
 /* ------------------------------------------------------------------ render */
@@ -1074,6 +1080,137 @@ function renderToday(t) {
   $("todayCloseBtn").onclick = closeToday;
 }
 
+/* ------------------------------------------------------------------ active calls: every generated + running call, long & short */
+
+let activeData = null;
+let activeTerm = "all";
+let activeStatus = null;          // null = automatic: "running" when something runs, otherwise "all"
+let activeTimer = null;
+let activeBusy = false;
+
+function loadActive(silent) {
+  if (activeBusy) return Promise.resolve();
+  activeBusy = true;
+  return fetch("/api/active")
+    .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then((d) => {
+      activeData = d;
+      const modal = $("activeModal").querySelector(".modal");
+      const top = modal ? modal.scrollTop : 0;
+      renderActive();
+      if (silent && modal) modal.scrollTop = top;
+    })
+    .catch((e) => {
+      if (silent && activeData) return;
+      $("activeBody").innerHTML = `<div class="error-state"><div class="big">ACTIVE CALLS UNAVAILABLE</div>
+        <div class="why">${esc(e.message)}</div><div class="fix">Needs a valid Upstox token — real data only, never filled-in calls.</div></div>`;
+    })
+    .finally(() => { activeBusy = false; });
+}
+
+function openActive() {
+  $("activeModal").classList.remove("hidden");
+  $("activeBody").innerHTML = `<div class="loading"><span class="spinner"></span> Loading every generated and running call…
+    (the first load after a restart can take ~30 s)</div>`;
+  loadActive(false);
+  clearInterval(activeTimer);
+  activeTimer = setInterval(() => {
+    if ($("activeModal").classList.contains("hidden") || document.hidden) return;
+    if (activeData && activeData.marketOpen === false && Date.now() / 1000 - activeData.serverTime < 60) return;
+    loadActive(true);
+  }, 5000);
+}
+
+function closeActive() {
+  $("activeModal").classList.add("hidden");
+  clearInterval(activeTimer);
+  activeTimer = null;
+}
+
+function renderActive() {
+  const d = activeData;
+  if (!d) return;
+  const c = d.counts;
+  const status = activeStatus || (c.running ? "running" : "all");
+  const clk = (t) => (t ? todayClock(t) : "—");
+  const pts = (x) => (x == null ? "—" : x);
+  let rows = d.calls.filter((r) => (activeTerm === "all" || r.term === activeTerm)
+    && (status === "all" || (status === "running" ? r.running : !r.running)));
+
+  const needTxt = (r, lvl, kind) => {
+    const l = r.ltp;
+    if (l == null) return "—";
+    const dir = r.side === "BUY" ? 1 : -1;
+    const dist = kind === "sl" ? (l - lvl) * dir : (lvl - l) * dir;
+    return dist >= 0 ? dist.toFixed(1) + " pts" : "passed";
+  };
+  const level = (r, key, lvl, ptsv, kind) => {
+    const at = r.touched[key];
+    let sub;
+    if (at) sub = `<span class="${kind === "sl" ? "neg" : "pos"}">${kind === "sl" ? "✗ stop touched" : "✓ touched"} ${clk(at)}</span>`;
+    else if (r.running) sub = `<span class="fcs">${kind === "sl" ? "room " : "needs "}${needTxt(r, lvl, kind)}</span>`;
+    else sub = `<span class="fcs">${kind === "sl" ? "not touched" : "not reached"}</span>`;
+    return `<td class="num ${kind === "sl" ? "neg" : key === "t1" ? "pos" : ""}">${fmt(lvl)}<div class="fcs">${ptsv} pts</div><div>${sub}</div></td>`;
+  };
+  const chip = (r) => {
+    if (r.running) return `<span class="pf-out pf-open">● RUNNING${r.best ? " · T" + r.best + " so far" : ""}</span>`;
+    if (r.status === "SL") return `<span class="pf-out pf-sl">SL HIT</span>`;
+    if (r.status === "TIMEOUT") return `<span class="pf-out pf-timeout">TIMEOUT</span>`;
+    return `<span class="pf-out pf-t1">${esc(r.status)} HIT</span>`;
+  };
+  const tr = rows.map((r) => `<tr${r.running ? ' style="background:rgba(59,130,246,.10)"' : ""}>
+      <td><span class="fc-badge">${r.term === "short" ? "SHORT" : "LONG"}</span><div class="fcs">${esc(r.candle)}</div></td>
+      <td class="name">${esc(r.name)}</td>
+      <td>${r.side === "BUY" ? '<span class="pos">▲ BUY</span>' : '<span class="neg">▼ SELL</span>'}</td>
+      <td class="num">${clk(r.generatedAt)}<div class="fcs">${r.running ? (r.openMinutes ?? 0) + " min ago" : "generated"}</div></td>
+      <td class="num">${fmt(r.entry)}<div class="fcs">${r.running && r.ltp != null ? "now " + fmt(r.ltp) : ""}</div></td>
+      ${level(r, "sl", r.sl, r.slPts, "sl")}
+      ${level(r, "t1", r.t1, r.t1Pts, "t")}
+      ${level(r, "t2", r.t2, r.t2Pts, "t")}
+      ${level(r, "t3", r.t3, r.t3Pts, "t")}
+      <td>${chip(r)}</td>
+      <td class="fcs">${r.running ? "window ends " + clk(r.windowEnd) : "closed"}${r.patterns && r.patterns.length ? "<br>" + esc(r.patterns.join(", ")) : ""}</td>
+    </tr>`).join("");
+
+  const live = d.marketOpen
+    ? `<span class="fc-badge pos">● LIVE · re-checked every 5 s · ${clk(d.serverTime)} IST</span>`
+    : `<span class="fc-badge">market closed · last data ${clk(d.serverTime)} IST</span>`;
+  const termBtn = (k, label) => `<button class="btn ${activeTerm === k ? "btn-accent" : "ghost"} ac-term" data-v="${k}">${label}</button>`;
+  const statBtn = (k, label) => `<button class="btn ${status === k ? "btn-accent" : "ghost"} ac-stat" data-v="${k}">${label}</button>`;
+  const ltpStrip = Object.entries(d.ltp || {}).map(([seg, v]) => `<span class="fc-badge">${esc(seg)} ${v.last == null ? "—" : fmt(v.last)}</span>`).join(" ");
+
+  $("activeBody").innerHTML = `
+    <div class="proof-card">
+      <div class="pf-h">${c.running ? `${c.running} running now` : "Nothing running right now"} ${live}
+        <span class="fc-badge">session ${esc(d.sessionDate || "—")}${d.isToday ? "" : " (last completed)"}</span></div>
+      <div class="pf-stats">
+        <div><span>Running now</span><b class="${c.running ? "pos" : ""}">${c.running}</b><div class="fcs">short ${c.runningShort} · long ${c.runningLong}</div></div>
+        <div><span>Generated this session</span><b>${c.total}</b><div class="fcs">short ${c.shortTotal} · long ${c.longTotal}</div></div>
+        <div><span>Reached a target</span><b class="pos">${c.hit}</b></div>
+        <div><span>Stopped out</span><b class="neg">${c.stopped}</b></div>
+        <div><span>Timed out</span><b>${c.timeout}</b></div>
+      </div>
+      <div class="pf-note">${ltpStrip}</div>
+      ${!c.running && !d.marketOpen ? `<div class="pf-note">The market is closed, so no call is running. Showing the calls generated in the last session so you can
+        see every level and the time it was touched.</div>` : ""}
+    </div>
+    <div class="proof-card">
+      <div class="pf-h">${status === "running" ? "Running calls" : status === "finished" ? "Finished calls" : "All generated calls"} — ${rows.length} shown
+        <span class="spacer"></span>
+        ${termBtn("all", "Long + Short")} ${termBtn("short", "Short term")} ${termBtn("long", "Long term")}
+        &nbsp;|&nbsp; ${statBtn("running", "Running")} ${statBtn("finished", "Finished")} ${statBtn("all", "All")}
+      </div>
+      ${rows.length ? `<div class="table-wrap" style="max-height:72vh;overflow:auto"><table class="research pf-table">
+        <thead><tr><th>Term</th><th>Index</th><th>Side</th><th>Generated</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th>
+          <th>Status</th><th>Window</th></tr></thead><tbody>${tr}</tbody></table></div>`
+        : `<div class="pf-note">No ${status === "running" ? "running " : ""}call matches this filter${status === "running" ? " — a new call appears here within seconds of its candle closing" : ""}.</div>`}
+      <div class="pf-note"><b>How to read it:</b> ${esc(d.notes.running)} ${esc(d.notes.live)} ${esc(d.notes.long)}</div>
+    </div>`;
+  document.querySelectorAll(".ac-term").forEach((b) => { b.onclick = () => { activeTerm = b.dataset.v; renderActive(); }; });
+  document.querySelectorAll(".ac-stat").forEach((b) => { b.onclick = () => { activeStatus = b.dataset.v; renderActive(); }; });
+}
+
+
 /* ------------------------------------------------------------------ generate calls: short term (1m / 5m / 15m / 30m) */
 
 let shortFilter = "all";
@@ -1345,9 +1482,137 @@ function renderShort() {
 document.addEventListener("click", (e) => {
   const tab = e.target.closest && e.target.closest(".gen-tab");
   if (!tab) return;
-  if (tab.dataset.tab === "short") { closeToday(); openShort(); }
-  else { closeShort(); openToday(); }
+  closeToday(); closeShort(); closeScore(); closeActive();
+  if (tab.dataset.tab === "short") openShort();
+  else if (tab.dataset.tab === "score") openScore();
+  else if (tab.dataset.tab === "active") openActive();
+  else openToday();
 });
+
+/* ------------------------------------------------------------------ scorecard: every strategy, 60 / 120 / 180 days */
+
+let scoreData = null;
+
+function openScore() {
+  $("scoreModal").classList.remove("hidden");
+  $("scoreBody").innerHTML = `<div class="loading"><span class="spinner"></span> Re-testing every strategy on 6 months of real
+    Upstox candles (first load takes ~45 s, then it is cached for 10 minutes)…</div>`;
+  fetch("/api/scorecard")
+    .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then((d) => { scoreData = d; renderScore(); })
+    .catch((e) => {
+      $("scoreBody").innerHTML = `<div class="error-state"><div class="big">SCORECARD UNAVAILABLE</div>
+        <div class="why">${esc(e.message)}</div><div class="fix">Needs a valid Upstox token — real candles only.</div></div>`;
+    });
+}
+
+function closeScore() { $("scoreModal").classList.add("hidden"); }
+
+function renderScore() {
+  const d = scoreData;
+  if (!d) return;
+  const W = d.windows.map(String);
+  const pc = (x) => (x == null ? "—" : x + "%");
+  const chip = (v) => `<span class="pf-out ${v === "PASS" ? "pf-t1" : v === "WEAK" ? "pf-timeout" : "pf-sl"}">${esc(v)}</span>`;
+  const cell = (s, withPf) => !s || !s.calls ? `<td class="num">—</td>`
+    : `<td class="num"><b class="${s.winRate >= d.targetWin ? "pos" : "neg"}">${pc(s.winRate)}</b>
+        <div class="fcs">${s.calls} calls · SL ${pc(s.slRate)}${withPf ? " · PF " + (s.profitFactor ?? "—") : ""}</div></td>`;
+  const monthsHtml = (ms) => (ms || []).map((m) => `<span class="fc-badge ${m.winRate >= d.targetWin ? "pos" : "neg"}">${esc(m.month.slice(2))} ${pc(m.winRate)} (${m.calls})</span>`).join(" ");
+
+  const longRows = d.long.map((r) => r.error
+    ? `<tr><td class="name">${esc(r.name)}</td><td colspan="5" class="neg">${esc(r.error)}</td></tr>`
+    : `<tr>
+      <td class="name">${esc(r.name)}<div class="fcs">${esc(r.profile)} · stop ${esc(r.stopRule)}</div></td>
+      ${W.map((w) => cell(r.windows[w], false)).join("")}
+      <td>${chip(r.verdict)}</td>
+      <td class="fcs">${monthsHtml(r.months)}</td></tr>`).join("");
+
+  const shortTables = ["1", "5", "15", "30"].map((tf) => {
+    const rows = d.short[tf].map((r) => !r.windows
+      ? `<tr><td class="name">${esc(r.name)}</td><td colspan="5" class="fcs">${esc(r.note || r.error || "")}</td></tr>`
+      : `<tr>
+        <td class="name">${esc(r.name)}${r.smallSample ? ' <span class="fc-badge">small sample</span>' : ""}
+          <div class="fcs">T1 +${r.ladder.t1} · T2 +${r.ladder.t2} · T3 +${r.ladder.t3} · SL −${r.ladder.sl}</div></td>
+        ${W.map((w) => cell(r.windows[w], true)).join("")}
+        <td>${chip(r.verdict)}</td>
+        <td class="fcs">${monthsHtml(r.months)}</td></tr>`).join("");
+    return `<div class="proof-card">
+      <div class="pf-h">Short term · ${tf}-minute candles</div>
+      <div class="table-wrap"><table class="research pf-table">
+        <thead><tr><th>Index</th>${W.map((w) => `<th>Last ${w} days</th>`).join("")}<th>Verdict</th><th>Win by month (calls)</th></tr></thead>
+        <tbody>${rows}</tbody></table></div></div>`;
+  }).join("");
+
+  // which suits you: PASS in every window, ranked by worst-window win then 180d profit factor
+  const picks = [];
+  Object.entries(d.short).forEach(([tf, rows]) => rows.forEach((r) => {
+    if (r.windows && r.verdict === "PASS") {
+      const ws = W.map((w) => r.windows[w]);
+      picks.push({ name: `${r.name} · ${tf}m`, minWin: Math.min(...ws.map((s) => s.winRate)),
+        pf: r.windows[W[W.length - 1]].profitFactor, n: r.windows[W[W.length - 1]].calls,
+        avg: r.windows[W[W.length - 1]].avgPlanPts, small: r.smallSample });
+    }
+  }));
+  picks.sort((a, b) => (b.pf ?? 0) - (a.pf ?? 0));
+  const pickRows = picks.map((p, i) => `<tr><td class="num">${i + 1}</td><td class="name">${esc(p.name)}${p.small ? ' <span class="fc-badge">small sample</span>' : ""}</td>
+      <td class="num pos">${p.minWin}%</td><td class="num">${p.pf ?? "—"}</td><td class="num">${p.avg ?? "—"}</td><td class="num">${p.n}</td></tr>`).join("");
+
+  const wf = d.walkforward;
+  const wfRows = wf ? wf.rows.map((r) => `<tr><td class="name">${esc(r.segment)}</td><td class="num">${r.tf}m</td>
+      <td class="num">${r.monthsTraded}/${wf.testMonths.length}</td><td class="num">${r.oos.calls}</td>
+      <td class="num"><b class="${r.oos.winRate >= d.targetWin ? "pos" : "neg"}">${pc(r.oos.winRate)}</b></td>
+      <td class="num">${pc(r.oos.slRate)}</td><td class="num ${(r.oos.profitFactor ?? 0) >= 1.3 ? "pos" : (r.oos.profitFactor ?? 0) < 1.1 ? "neg" : ""}">${r.oos.profitFactor ?? "—"}</td></tr>`).join("") : "";
+
+  const sens = (d.sensitivity || []).map((s) => `${esc(s.segment)} ${s.tf}m: ${pc(s.full.winRate)} → ${pc(s.cap1515.winRate)}`).join(" · ");
+
+  $("scoreBody").innerHTML = `
+    <div class="proof-card">
+      <div class="pf-h">Is the data real? <span class="fc-badge pos">audited</span></div>
+      <div class="pf-note">Every candle is real Upstox market data: 5m from ${esc(d.dataSpan["5m NIFTY"].from)} and 1m from ${esc(d.dataSpan["1m NIFTY"].from)} to
+        ${esc(d.dataSpan["1m NIFTY"].to)}. The audit found <b>0 non-Upstox bars, 0 bad candles, 0 duplicates</b>; every five-minute bar matches its
+        1-minute bars exactly; daily closes agree with Yahoo Finance (median difference 0.01%); and there is <b>no random / mock / synthetic generator</b>
+        anywhere in the code. Re-run it any time: <code>python data_audit.py</code>.</div>
+      ${d.audit ? `<details><summary class="fcs">Show the full audit report</summary><pre class="fcs" style="white-space:pre-wrap">${esc(d.audit)}</pre></details>` : ""}
+    </div>
+    <div class="proof-card">
+      <div class="pf-h">How to read this</div>
+      <div class="pf-note"><b>Win</b> = T1, T2 or T3 reached before the stop (each call counted once, on the real 1-minute path).
+        <b>PASS</b> = win ≥ ${d.targetWin}% in all of the last 60, 120 and 180 days · <b>WEAK</b> = passes the last 60 days but not a longer window ·
+        <b>FAIL</b> = below ${d.targetWin}% recently. <b>PF</b> = profit factor (gross win ÷ gross loss). <b>Caution:</b> the strategies were tuned on this history,
+        so 120/180 days show <i>consistency</i>, not fresh proof — the out-of-sample table at the bottom is the real test.</div>
+    </div>
+    <div class="proof-card">
+      <div class="pf-h">Long term · six segments (original precision profiles, 5m signals)</div>
+      <div class="table-wrap"><table class="research pf-table">
+        <thead><tr><th>Segment</th>${W.map((w) => `<th>Last ${w} days</th>`).join("")}<th>Verdict</th><th>Win by month (calls)</th></tr></thead>
+        <tbody>${longRows}</tbody></table></div>
+      <div class="pf-note">Long-term calls use wide stops, so they win often but each loss is large; check "Avg R" on the Today's calls page before relying on them.</div>
+    </div>
+    ${shortTables}
+    <div class="proof-card">
+      <div class="pf-h">Which short-term setups pass everywhere — ranked by 180-day profit factor</div>
+      ${pickRows ? `<div class="table-wrap"><table class="research pf-table"><thead><tr><th>#</th><th>Setup</th><th>Worst-window win</th>
+        <th>PF (180d)</th><th>Avg pts / call</th><th>Calls (180d)</th></tr></thead><tbody>${pickRows}</tbody></table></div>` : `<div class="pf-note">None passes in every window.</div>`}
+      <div class="pf-note">Higher PF = more profit per unit of loss. 1-minute setups win often but earn very little per call, so brokerage and slippage matter most there.</div>
+    </div>
+    ${wf ? `<div class="proof-card">
+      <div class="pf-h">The honest test — out-of-sample walk-forward</div>
+      <div class="pf-note">${esc(wf.note)} Each index and candle size, ${wf.testMonths.length} unseen months (${esc(wf.testMonths[0])} … ${esc(wf.testMonths[wf.testMonths.length - 1])}).
+        If this table looks good, the <i>way the strategies are chosen</i> works on new data.</div>
+      <div class="table-wrap"><table class="research pf-table"><thead><tr><th>Index</th><th>Candle</th><th>Months traded</th><th>Calls</th>
+        <th>Win</th><th>SL first</th><th>Profit factor</th></tr></thead><tbody>${wfRows}</tbody></table></div>
+    </div>` : ""}
+    <div class="proof-card">
+      <div class="pf-h">Does the flat 15:15–15:29 index feed distort anything?</div>
+      <div class="pf-note">The exchange's index series is flat from 15:15 and jumps at 15:29 (Yahoo shows the same). Forcing every short-term trade to
+        end by 15:15 changes win rates by: ${sens || "n/a"}.</div>
+      <div class="modal-actions"><span class="spacer"></span>
+        <a class="btn ghost" href="/api/scorecard?format=csv" download>Download scorecard CSV</a>
+        <button class="btn" id="scoreCloseBtn">Close</button></div>
+    </div>`;
+  $("scoreCloseBtn").onclick = closeScore;
+}
+
 
 /* ------------------------------------------------------------------ next-day / overnight */
 
@@ -2152,6 +2417,11 @@ $("proofClose").addEventListener("click", closeProof);
 $("proofModal").addEventListener("click", (e) => { if (e.target.id === "proofModal") closeProof(); });
 $("shortBtn").addEventListener("click", openShort);
 $("shortClose").addEventListener("click", closeShort);
+$("activeBtn").addEventListener("click", openActive);
+$("activeClose").addEventListener("click", closeActive);
+$("activeModal").addEventListener("click", (e) => { if (e.target.id === "activeModal") closeActive(); });
+$("scoreClose").addEventListener("click", closeScore);
+$("scoreModal").addEventListener("click", (e) => { if (e.target.id === "scoreModal") closeScore(); });
 $("shortModal").addEventListener("click", (e) => { if (e.target.id === "shortModal") closeShort(); });
 $("todayBtn").addEventListener("click", openToday);
 $("todayClose").addEventListener("click", closeToday);
@@ -2168,10 +2438,18 @@ $("accessBtn").addEventListener("click", openAccess);
 $("accessClose").addEventListener("click", closeAccess);
 $("accessModal").addEventListener("click", (e) => { if (e.target.id === "accessModal") closeAccess(); });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { closeShort(); closeResearch(); closeProof(); closeToday(); closeOvernight(); closeStockTest(); closeNifty(); closeAccess(); }
+  if (e.key === "Escape") { closeActive(); closeScore(); closeShort(); closeResearch(); closeProof(); closeToday(); closeOvernight(); closeStockTest(); closeNifty(); closeAccess(); }
 });
 
 setInterval(clockTick, 1000);
 clockTick();
 setAuto(true);
-load(true);
+// never show a blank dashboard while the first data load is in flight
+$("chartTitle").textContent = "Loading live market data…";
+$("signalCard").innerHTML = `<div class="loading"><span class="spinner"></span> Loading real Upstox data…
+  the first load after a restart can take up to ~30 s on a slow link.</div>`;
+setTimeout(() => {
+  if (!state.data) $("feedNotes").innerHTML = `<div class="note">Still loading — the server is fetching Upstox data. Keep this page open;
+    if nothing appears within a minute, press Refresh.</div>`;
+}, 25000);
+load(false);

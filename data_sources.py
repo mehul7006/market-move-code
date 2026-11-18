@@ -19,11 +19,11 @@ def _get_json(url, timeout=12):
         return json.loads(r.read().decode("utf-8"))
 
 
-def yahoo_chart(symbol, range_="6mo", interval="1d"):
+def yahoo_chart(symbol, range_="6mo", interval="1d", timeout=12):
     """Real OHLC candles + live-ish spot for an index symbol (^NSEI, ^BSESN, ^CNXIT, ...)."""
     url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
            f"{urllib.parse.quote(symbol)}?range={range_}&interval={interval}&includePrePost=false")
-    res = _get_json(url)["chart"]["result"][0]
+    res = _get_json(url, timeout)["chart"]["result"][0]
     meta = res["meta"]
     quote = res["indicators"]["quote"][0]
     stamps = res.get("timestamp") or []

@@ -17,3 +17,7 @@ all_calls_*.csv
 calls_60d.csv
 calls_60d.html
 backtest_60d_result.json
+scorecard.csv
+wf.log
+nohup.out
+scorecard_out.json

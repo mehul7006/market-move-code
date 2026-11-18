@@ -38,6 +38,7 @@ import bisect
 import analysis
 
 TIMEFRAMES = (1, 5, 15, 30)
+SESSION_CLOSE_MIN = 15 * 60 + 30   # minute the last bar closes; a test may lower it to 15:15 to ignore the exchange's frozen tail
 SEGMENTS = {"NIFTY": "Nifty 50", "BANKNIFTY": "Bank Nifty", "SENSEX": "Sensex", "NEXT50": "Next 50"}
 NO_EDGE = {"FINNIFTY": "Fin Nifty", "MIDCPNIFTY": "Midcap Select"}
 _COMMON = {"firstEntry": 9 * 60 + 25, "lastEntry": 14 * 60 + 15, "maxPerDay": 3}
@@ -205,7 +206,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     n, tf = len(cs), p["tf"]
     t1, t2, t3, sl = p["t1"], p["t2"], p["t3"], p["sl"]
     day_start = cs[i]["t"] - ((cs[i]["t"] + 19800) % 86400)
-    deadline = min(cs[i]["t"] + p["horizon"] * tf * 60, day_start + 929 * 60)
+    deadline = min(cs[i]["t"] + p["horizon"] * tf * 60, day_start + (SESSION_CLOSE_MIN - 1) * 60)
     end = i
     while end + 1 < n and cs[end + 1]["t"] <= deadline and _day(cs[end + 1]["t"]) == _day(cs[i]["t"]):
         end += 1
@@ -213,7 +214,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     # full scoring window = signal candle + horizon candles, capped at the close. Open calls are tracked all the
     # way to "now" on the 1-minute path INCLUDING the still-forming minute, so a touch counts the moment the
     # minute's high/low reaches a level, without waiting for any candle to complete.
-    wfull = min(cs[i]["t"] + (p["horizon"] + 1) * tf * 60, day_start + 930 * 60)
+    wfull = min(cs[i]["t"] + (p["horizon"] + 1) * tf * 60, day_start + SESSION_CLOSE_MIN * 60)
     covered_to = cs[end]["t"] + tf * 60
     path, step, res = cs[i + 1:end + 1], tf * 60, "%sm" % tf
     if fine and tf > 1:
@@ -265,7 +266,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
                 if not planopen:
                     plan_alive, plan_end_t, plan_reason = False, c["t"], "All three targets booked"
     complete = ((end + 1 < n) or cs[end]["t"] >= deadline
-                or cs[end]["t"] + tf * 60 >= day_start + 930 * 60
+                or cs[end]["t"] + tf * 60 >= day_start + SESSION_CLOSE_MIN * 60
                 or (now is not None and now >= wfull))
     resolved = stopped or maxhit == 3
     last = ((path[-1]["close"] if path else cs[end]["close"]) - entry) * sign

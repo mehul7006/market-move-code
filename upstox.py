@@ -77,14 +77,24 @@ class UpstoxClient:
             "Accept": "application/json",
             "User-Agent": _UA,
         })
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "ignore")[:300]
-            raise UpstoxError(f"HTTP {exc.code}: {body}") from None
-        except Exception as exc:
-            raise UpstoxError(str(exc)) from None
+        data = None
+        for attempt in range(3):
+            # transient network blips (connection reset, 429, 5xx) are retried; real API errors are not
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", "ignore")[:300]
+                if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                raise UpstoxError(f"HTTP {exc.code}: {body}") from None
+            except Exception as exc:
+                if attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                raise UpstoxError(str(exc)) from None
         if isinstance(data, dict) and data.get("status") == "error":
             errs = data.get("errors") or [{}]
             raise UpstoxError(errs[0].get("message") or "Upstox API error")

@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Market Signal Desk — Sensex · Nifty · Segments (live)</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%278%27 fill=%27%2310b981%27/%3E%3Cpath d=%27M16 8l9 16H7z%27 fill=%27%23071018%27/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -24,7 +25,8 @@
       <span class="track"><span class="thumb"></span></span>
       <span class="switch-label">Live · 5s</span>
     </label>
-    <button class="btn btn-accent" id="shortBtn">Generate calls</button>
+    <button class="btn btn-accent" id="activeBtn">Active calls</button>
+    <button class="btn" id="shortBtn">Generate calls</button>
     <button class="btn" id="todayBtn" style="display:none">Today's calls</button>
     <button class="btn" id="niftyBtn">Nifty 50</button>
     <button class="btn" id="overnightBtn">Next-day</button>
@@ -142,6 +144,42 @@
   </div>
 </div>
 
+<div class="modal-backdrop hidden" id="activeModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h2>Active calls — every generated and running call</h2>
+        <p class="modal-sub">Long term and short term in one place. A call is RUNNING until its stop is touched, T3 is
+          reached, or its window ends — checked live against the forming 1-minute candle and the latest price.</p>
+      </div>
+      <button class="modal-close" id="activeClose" aria-label="Close">✕</button>
+    </div>
+    <div class="gen-tabs"><button class="btn btn-accent gen-tab" data-tab="active">Active calls</button>
+      <button class="btn ghost gen-tab" data-tab="short">Short term</button>
+      <button class="btn ghost gen-tab" data-tab="long">Long term</button>
+      <button class="btn ghost gen-tab" data-tab="score">Scorecard 60/120/180d</button></div>
+    <div id="activeBody"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="scoreModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h2>Scorecard — every strategy over 60, 120 and 180 days</h2>
+        <p class="modal-sub">Each segment, long term and short term, with short term split by candle size, so you can decide
+          what suits you. Real Upstox data only; see the audit at the top.</p>
+      </div>
+      <button class="modal-close" id="scoreClose" aria-label="Close">✕</button>
+    </div>
+    <div class="gen-tabs"><button class="btn ghost gen-tab" data-tab="active">Active calls</button>
+      <button class="btn ghost gen-tab" data-tab="short">Short term</button>
+      <button class="btn ghost gen-tab" data-tab="long">Long term</button>
+      <button class="btn btn-accent gen-tab" data-tab="score">Scorecard 60/120/180d</button></div>
+    <div id="scoreBody"></div>
+  </div>
+</div>
+
 <div class="modal-backdrop hidden" id="shortModal">
   <div class="modal">
     <div class="modal-head">
@@ -153,8 +191,10 @@
       </div>
       <button class="modal-close" id="shortClose" aria-label="Close">✕</button>
     </div>
-    <div class="gen-tabs"><button class="btn btn-accent gen-tab" data-tab="short">Short term</button>
-      <button class="btn ghost gen-tab" data-tab="long">Long term</button></div>
+    <div class="gen-tabs"><button class="btn ghost gen-tab" data-tab="active">Active calls</button>
+      <button class="btn btn-accent gen-tab" data-tab="short">Short term</button>
+      <button class="btn ghost gen-tab" data-tab="long">Long term</button>
+      <button class="btn ghost gen-tab" data-tab="score">Scorecard 60/120/180d</button></div>
     <div id="shortBody"></div>
   </div>
 </div>
@@ -170,8 +210,10 @@
       </div>
       <button class="modal-close" id="todayClose" aria-label="Close">✕</button>
     </div>
-    <div class="gen-tabs"><button class="btn ghost gen-tab" data-tab="short">Short term</button>
-      <button class="btn btn-accent gen-tab" data-tab="long">Long term</button></div>
+    <div class="gen-tabs"><button class="btn ghost gen-tab" data-tab="active">Active calls</button>
+      <button class="btn ghost gen-tab" data-tab="short">Short term</button>
+      <button class="btn btn-accent gen-tab" data-tab="long">Long term</button>
+      <button class="btn ghost gen-tab" data-tab="score">Scorecard 60/120/180d</button></div>
     <div id="todayBody"></div>
   </div>
 </div>

@@ -1,0 +1,58 @@
+==============================================================================
+DATA AUDIT - every candle must be real Upstox data
+==============================================================================
+
+NIFTY  (NSE_INDEX|Nifty 50)
+  5m : 12164 bars, 163 sessions, 2026-03-23 -> 2026-11-18 15:25 IST
+       sources {'UPSTOX': 12164} | bad OHLC 0 | duplicates 0 | out-of-order 0 | short sessions 1 | weekend sessions 1 | frozen-bar runs 0
+  1m : 48820 bars, 131 sessions, 2026-05-13 -> 2026-11-18 15:29 IST | bad OHLC 0 | duplicates 0 | frozen runs 75
+  1m->5m cross-check: 9764/9764 five-minute bars match the aggregated 1-minute bars (100.00%), 0 skipped (incomplete group), largest mismatch 0.00 pts
+  Yahoo daily-close check: 162 sessions compared, median diff 0.010%, 95th pct 0.135%, worst 0.261%
+
+BANKNIFTY  (NSE_INDEX|Nifty Bank)
+  5m : 12164 bars, 163 sessions, 2026-03-23 -> 2026-11-18 15:25 IST
+       sources {'UPSTOX': 12164} | bad OHLC 0 | duplicates 0 | out-of-order 0 | short sessions 1 | weekend sessions 1 | frozen-bar runs 0
+  1m : 48820 bars, 131 sessions, 2026-05-13 -> 2026-11-18 15:29 IST | bad OHLC 0 | duplicates 0 | frozen runs 75
+  1m->5m cross-check: 9764/9764 five-minute bars match the aggregated 1-minute bars (100.00%), 0 skipped (incomplete group), largest mismatch 0.00 pts
+  Yahoo daily-close check: 162 sessions compared, median diff 0.014%, 95th pct 0.175%, worst 0.280%
+
+SENSEX  (BSE_INDEX|SENSEX)
+  5m : 12164 bars, 163 sessions, 2026-03-23 -> 2026-11-18 15:25 IST
+       sources {'UPSTOX': 12164} | bad OHLC 0 | duplicates 0 | out-of-order 0 | short sessions 1 | weekend sessions 1 | frozen-bar runs 3
+  1m : 48820 bars, 131 sessions, 2026-05-13 -> 2026-11-18 15:29 IST | bad OHLC 0 | duplicates 0 | frozen runs 75
+  1m->5m cross-check: 9764/9764 five-minute bars match the aggregated 1-minute bars (100.00%), 0 skipped (incomplete group), largest mismatch 0.00 pts
+  Yahoo daily-close check: 162 sessions compared, median diff 0.014%, 95th pct 0.152%, worst 0.459%
+
+NEXT50  (NSE_INDEX|Nifty Next 50)
+  5m : 12164 bars, 163 sessions, 2026-03-23 -> 2026-11-18 15:25 IST
+       sources {'UPSTOX': 12164} | bad OHLC 0 | duplicates 0 | out-of-order 0 | short sessions 1 | weekend sessions 1 | frozen-bar runs 0
+  1m : 48820 bars, 131 sessions, 2026-05-13 -> 2026-11-18 15:29 IST | bad OHLC 0 | duplicates 0 | frozen runs 0
+  1m->5m cross-check: 9764/9764 five-minute bars match the aggregated 1-minute bars (100.00%), 0 skipped (incomplete group), largest mismatch 0.00 pts
+  Yahoo check: no Yahoo symbol for this index (Upstox only)
+
+FINNIFTY  (NSE_INDEX|Nifty Fin Service)
+  5m : 12164 bars, 163 sessions, 2026-03-23 -> 2026-11-18 15:25 IST
+       sources {'UPSTOX': 12164} | bad OHLC 0 | duplicates 0 | out-of-order 0 | short sessions 1 | weekend sessions 1 | frozen-bar runs 0
+  1m : 48820 bars, 131 sessions, 2026-05-13 -> 2026-11-18 15:29 IST | bad OHLC 0 | duplicates 0 | frozen runs 75
+  1m->5m cross-check: 9764/9764 five-minute bars match the aggregated 1-minute bars (100.00%), 0 skipped (incomplete group), largest mismatch 0.00 pts
+  Yahoo check: no Yahoo symbol for this index (Upstox only)
+
+MIDCPNIFTY  (NSE_INDEX|NIFTY MID SELECT)
+  5m : 12164 bars, 163 sessions, 2026-03-23 -> 2026-11-18 15:25 IST
+       sources {'UPSTOX': 12164} | bad OHLC 0 | duplicates 0 | out-of-order 0 | short sessions 1 | weekend sessions 1 | frozen-bar runs 0
+  1m : 48820 bars, 131 sessions, 2026-05-13 -> 2026-11-18 15:29 IST | bad OHLC 0 | duplicates 0 | frozen runs 75
+  1m->5m cross-check: 9764/9764 five-minute bars match the aggregated 1-minute bars (100.00%), 0 skipped (incomplete group), largest mismatch 0.00 pts
+  Yahoo check: no Yahoo symbol for this index (Upstox only)
+
+--- code scan: random / mock / synthetic data generators ---
+  generators found: 0
+
+RESULT: ALL CHECKS PASSED - data is real Upstox market data
+
+NOTES ON TWO THINGS THE AUDIT FLAGS (both checked, both real market behaviour, not missing data)
+ 1. "frozen runs": from 2026-08-03 the NSE index series is flat from 15:15 to 15:28 each session and then jumps at 15:29.
+    Yahoo Finance (an unrelated source) shows exactly the same flat bars and the same jump, so this is how the exchange
+    disseminates the index, not an Upstox fault. Sensex 5m has 3 flat stretches (5 Oct, 6 Nov, 11 Nov).
+    Sensitivity test: forcing every short-term trade to end by 15:15 changes no win rate and moves no profit factor by
+    more than 0.02, so these flat bars do not drive any result.
+ 2. "weekend session / short session": Sunday 2026-11-08 is the Diwali Muhurat trading hour (14 five-minute bars).
