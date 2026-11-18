@@ -52,34 +52,37 @@ def _p(seg, tf, family, bias, t1, t2, t3, sl, horizon_min, **kw):
     return d
 
 
-# Exit styles: how the position is managed once a call is open. They change the PROFIT, never the win rate (a win is
-# still "T1 reached before the stop"). In every style the stop moves to entry once T1 is touched.
-#   steady   3 lots: book 1/3 at T1, 1/3 at T2, 1/3 at T3                 (the original plan)
-#   balanced 2 lots: book 1 lot at T1, hold the other until the window ends
-#   runner   1 lot : book nothing at T1 - just move the stop to entry - and hold until the window ends
-# Backtest on 1,485 real calls (older history for the choice, last 60 days to check): average profit per call, in units
-# of the stop, went 0.206 -> 0.432 (and 0.022 -> 0.132 under a stricter same-minute assumption) when each index uses
-# its recommended style. The cost: with runner, about 6 in 10 calls end near zero and a few big trend moves pay for it.
-EXIT_STYLES = {
-    "steady": [("t1", 1 / 3), ("t2", 1 / 3), ("t3", 1 / 3)],
-    "balanced": [("t1", 0.5), (None, 0.5)],
-    "runner": [("t1", 0.0), (None, 1.0)],
+# ONE position, no partial booking and no extra lots. How it is managed once the call is open changes the PROFIT, never the
+# win rate (a win is still "T1 reached before the stop"). Backtested on 1,485 real calls (older history, then the last 60 days):
+#   runner   stop -> entry once T1 is touched, then hold until the window ends (or the stop). The best single-lot rule: average
+#            profit per call 0.227 R older / 0.44 R last 60 days, versus 0.118 / 0.206 for the old 1/3-at-each-target plan. About
+#            24% of calls are full stop-outs and about 6 in 10 end near zero; a few big trend moves pay for the rest.
+#   protect  stop -> entry + 0.25xT1 once price is +0.5xT1. Fewer full stop-outs (about 17%) but less robust: under a strict
+#            same-minute assumption its profit disappears.
+#   target   stop -> entry after T1, take profit at T3. A fixed-target bracket: smaller profit (0.155 R / 0.278 R).
+# Everything else I tried did NOT help: entry filters (higher-timeframe, volatility, trend strength, VWAP distance, candle shape,
+# time of day), wider or tighter stops, breakout / opening-range / previous-day-level signals, pullback and confirmation entries.
+MANAGE = {
+    "runner": {"be_trig": 1.0, "be_off": 0.0, "tp": None},
+    "protect": {"be_trig": 0.5, "be_off": 0.25, "tp": None},
+    "target": {"be_trig": 1.0, "be_off": 0.0, "tp": "t3"},
 }
-EXIT_LABELS = {"steady": "3 lots · Steady", "balanced": "2 lots · Balanced", "runner": "1 lot · Runner"}
+EXIT_STYLES = tuple(MANAGE)
+EXIT_LABELS = {"runner": "Runner (recommended)", "protect": "Protect early", "target": "Fixed T3 target"}
 
 # (segment, candle minutes) -> strategy. Pairs not listed issue no calls.
 STRATEGIES = {
-    ("NIFTY", 1): _p("NIFTY", 1, "vwapx", "trend", 9, 15, 22, 15, 60, exit="balanced"),
-    ("BANKNIFTY", 1): _p("BANKNIFTY", 1, "vwapx", "trend", 13, 32, 63, 44, 120, exit="balanced"),
-    ("SENSEX", 1): _p("SENSEX", 1, "vwapx", "strong", 20, 47, 67, 47, 120, exit="runner"),
+    ("NIFTY", 1): _p("NIFTY", 1, "vwapx", "trend", 9, 15, 22, 15, 60),
+    ("BANKNIFTY", 1): _p("BANKNIFTY", 1, "vwapx", "trend", 13, 32, 63, 44, 120),
+    ("SENSEX", 1): _p("SENSEX", 1, "vwapx", "strong", 20, 47, 67, 47, 120),
     # 5m / 15m stops were re-tuned with outcomes scored on the real 1-minute path (see module docstring): stops sit at
     # ~0.3-0.4x the final target. Each held >= 70% wins on the older history AND on the held-back last 60 days.
     ("NIFTY", 5): _p("NIFTY", 5, "vwapx", "strong", 8, 35, 50, 15, 120),
     ("BANKNIFTY", 5): _p("BANKNIFTY", 5, "vwapx", "strong", 14, 98, 140, 42, 120),
-    ("SENSEX", 5): _p("SENSEX", 5, "vwapx", "strong", 22, 105, 150, 60, 120, exit="runner"),
-    ("NEXT50", 5): _p("NEXT50", 5, "vwapx", "trend", 24, 112, 160, 64, 120, exit="runner"),
-    ("SENSEX", 15): _p("SENSEX", 15, "vwapx", "strong", 26, 182, 260, 78, 120, smallSample=True, exit="runner"),
-    ("NEXT50", 15): _p("NEXT50", 15, "vwapx", "trend", 28, 194, 277, 83, 120, smallSample=True, exit="runner"),
+    ("SENSEX", 5): _p("SENSEX", 5, "vwapx", "strong", 22, 105, 150, 60, 120),
+    ("NEXT50", 5): _p("NEXT50", 5, "vwapx", "trend", 24, 112, 160, 64, 120),
+    ("SENSEX", 15): _p("SENSEX", 15, "vwapx", "strong", 26, 182, 260, 78, 120, smallSample=True),
+    ("NEXT50", 15): _p("NEXT50", 15, "vwapx", "trend", 28, 194, 277, 83, 120, smallSample=True),
 }
 
 # what testing found where a pair has no strategy (shown to the user instead of an invented call)
@@ -244,9 +247,8 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
             path = path + tail
     stopped, maxhit, stop_t, hit_t = False, 0, None, {}
     mfe = 0.0
-    lvl = {"t1": t1, "t2": t2, "t3": t3, None: None}
-    plans = {k: {"stop": -sl, "open": [[lvl[tg], fr] for tg, fr in legs], "pts": 0.0, "alive": True, "endT": None,
-                 "reason": None} for k, legs in EXIT_STYLES.items()}
+    plans = {k: {"stop": -sl, "pts": 0.0, "alive": True, "endT": None, "reason": None, "kind": None, "maxfav": 0.0}
+             for k in MANAGE}
     t1_pts, t1_done = 0.0, False
     for c in path:
         hi = (c["high"] - entry) * sign if sign > 0 else (entry - c["low"])
@@ -266,22 +268,27 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
                 t1_pts, t1_done = -sl, True
             elif hi >= t1:
                 t1_pts, t1_done = t1, True
-        for pl in plans.values():
+        for k, pl in plans.items():
             if not pl["alive"]:
                 continue
+            rule = MANAGE[k]
             if lo <= pl["stop"]:                      # stop first inside a candle
-                pl["pts"] += sum(f for _, f in pl["open"]) * pl["stop"]
-                pl["reason"] = "Stop moved to entry after T1 - touched" if pl["stop"] >= 0 else "Stop loss touched"
-                pl["open"], pl["alive"], pl["endT"] = [], False, c["t"]
+                pl["pts"] = pl["stop"]
+                if pl["stop"] <= -sl + 1e-9:
+                    pl["kind"], pl["reason"] = "SL", "Stop loss touched"
+                elif pl["stop"] > 1e-9:
+                    pl["kind"], pl["reason"] = "LOCK", "Stop moved above entry after the trigger - touched (profit locked)"
+                else:
+                    pl["kind"], pl["reason"] = "BE", "Stop moved to entry after T1 - touched"
+                pl["alive"], pl["endT"] = False, c["t"]
                 continue
-            for leg in list(pl["open"]):
-                if leg[0] is not None and hi >= leg[0]:
-                    pl["pts"] += leg[1] * leg[0]
-                    pl["open"].remove(leg)
-                    if leg[0] == t1:
-                        pl["stop"] = max(pl["stop"], 0.0)     # stop to entry once T1 is touched (next candle onward)
-            if not pl["open"]:
-                pl["alive"], pl["endT"], pl["reason"] = False, c["t"], "All targets booked"
+            if rule["tp"] and hi >= t3:
+                pl["pts"], pl["kind"], pl["reason"] = t3, "TP", "Target T3 booked"
+                pl["alive"], pl["endT"] = False, c["t"]
+                continue
+            pl["maxfav"] = max(pl["maxfav"], hi)
+            if pl["maxfav"] >= rule["be_trig"] * t1:      # protective stop applies from the NEXT candle on
+                pl["stop"] = max(pl["stop"], rule["be_off"] * t1)
     complete = ((end + 1 < n) or cs[end]["t"] >= deadline
                 or cs[end]["t"] + tf * 60 >= day_start + SESSION_CLOSE_MIN * 60
                 or (now is not None and now >= wfull))
@@ -296,10 +303,13 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     else:
         bucket = "TIMEOUT"
     for pl in plans.values():
-        if pl["alive"]:
-            pl["pts"] += sum(f for _, f in pl["open"]) * last
+        if pl["alive"]:                               # still open at the end of the data: mark to market
+            pl["pts"] = last
             pl["endT"] = path[-1]["t"] if path else None
-            pl["reason"] = "Still open" if bucket == "OPEN" else "Window ended - closed at last price"
+            pl["kind"] = "END"
+            pl["reason"] = ("Window ended - closed at last price" if complete
+                            else "Still running - hold with the stop at entry")
+            pl["alive"] = not complete
     if not t1_done:
         t1_pts = last
 
@@ -309,7 +319,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     return {"bucket": bucket, "endIdx": end, "mfe": _round(mfe, 1), "res": res,
             "live": bool(path) and now is not None and (path[-1]["t"] + 60 > now if res == "1m" else False),
             "plans": {k: {"pts": _round(v["pts"], 1), "exitAt": v["endT"], "exitAfter": after(v["endT"]),
-                          "reason": v["reason"]} for k, v in plans.items()},
+                          "reason": v["reason"], "kind": v["kind"], "alive": v["alive"]} for k, v in plans.items()},
             "t1Pts": _round(t1_pts, 1),
             "t1At": hit_t.get(1), "t2At": hit_t.get(2), "t3At": hit_t.get(3), "slAt": stop_t,
             "t1After": after(hit_t.get(1)), "t2After": after(hit_t.get(2)), "t3After": after(hit_t.get(3)),
@@ -350,7 +360,7 @@ def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
         bull, bear = patterns(cs, i, F["atr"][i])
         pb, pr = patterns(cs, i - 1, F["atr"][i - 1])
         mine = (bull + pb) if s > 0 else (bear + pr)
-        style = p.get("exit", "steady")
+        style = p.get("exit", "runner")
         pr = tr["plans"][style]
         out.append({
             "segment": p["seg"], "tf": tf, "name": p["name"], "t": cs[i]["t"],
@@ -365,6 +375,7 @@ def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
             "t1After": tr["t1After"], "t2After": tr["t2After"], "t3After": tr["t3After"],
             "slAfter": tr["slAfter"], "exitStyle": style, "plans": tr["plans"],
             "planExitAt": pr["exitAt"], "planReason": pr["reason"], "planExitAfter": pr["exitAfter"],
+            "planAlive": pr["alive"],
             "exit": tr["exit"], "mfe": tr["mfe"], "planPts": pr["pts"], "t1ExitPts": tr["t1Pts"],
             "live": tr["live"], "id": "%s-%s-%s" % (p["seg"], tf, cs[i]["t"]),
             "preRun": _round((e - cs[i - lookback]["close"]) * s, 1),
@@ -373,7 +384,7 @@ def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
     return out
 
 
-def _pts_stats(closed, getter):
+def _pts_stats(closed, getter, kind=None):
     """Profit statistics for one way of managing the trades. A call 'gains' when it makes more than +0.1 of its stop,
     'loses' when it falls more than -0.1 of its stop, and is a 'scratch' (about zero) in between."""
     pts = [(getter(r), r["slPts"]) for r in closed]
@@ -392,13 +403,16 @@ def _pts_stats(closed, getter):
         "scratchRate": round(scr / n * 100, 1) if n else None,
         "lossRate": round(len(loses) / n * 100, 1) if n else None,
         "profitFactor": round(wins_sum / loss_sum, 2) if loss_sum else None,
+        # share of calls that ended with the ORIGINAL stop touched (a full stop-out) under this way of managing the trade
+        "stopRate": round(sum(1 for r in closed if kind(r) == "SL") / n * 100, 1) if (n and kind) else None,
     }
 
 
 def summarize(calls):
     n = len(calls)
-    c = collections.Counter(r["result"] for r in calls)
-    closed = [r for r in calls if r["result"] != "OPEN"]
+    # a call is "closed" once its bucket is final AND the managed single-lot trade has ended (a runner can still be open)
+    closed = [r for r in calls if r["result"] != "OPEN" and not r.get("planAlive")]
+    c = collections.Counter(r["result"] for r in closed)
     anyt = c["T1"] + c["T2"] + c["T3"]
 
     def rate(x, d=n):
@@ -407,7 +421,7 @@ def summarize(calls):
     pre = [r["preRun"] for r in closed if r.get("preRun") is not None]
     out = {
         "calls": n, "SL": c["SL"], "T1": c["T1"], "T2": c["T2"], "T3": c["T3"],
-        "timeouts": c["TIMEOUT"], "open": c["OPEN"],
+        "timeouts": c["TIMEOUT"], "open": n - len(closed),
         "slRate": rate(c["SL"], len(closed)), "t1Rate": rate(c["T1"], len(closed)),
         "t2Rate": rate(c["T2"], len(closed)), "t3Rate": rate(c["T3"], len(closed)),
         "winRate": rate(anyt, len(closed)),
@@ -415,8 +429,9 @@ def summarize(calls):
         "medianT1Min": round(statistics.median(t1m)) if t1m else None,
         "medianPreRun": round(statistics.median(pre), 1) if pre else None,
     }
-    out.update(_pts_stats(closed, lambda r: r["planPts"]))          # each call's recommended exit style
-    out["styles"] = {k: _pts_stats(closed, lambda r, k=k: r["plans"][k]["pts"]) for k in EXIT_STYLES} if closed else {}
+    out.update(_pts_stats(closed, lambda r: r["planPts"], lambda r: r["plans"][r["exitStyle"]]["kind"]))   # default rule
+    out["styles"] = {k: _pts_stats(closed, lambda r, k=k: r["plans"][k]["pts"], lambda r, k=k: r["plans"][k]["kind"])
+                     for k in EXIT_STYLES} if closed else {}
     return out
 
 
@@ -491,7 +506,7 @@ def build(candles_by_tf, days=60, now=None, futures=None):
             ent.update(family=p["family"],
                        familyLabel="VWAP reclaim in a trend" if p["family"] == "vwapx" else "Trend pullback resume",
                        ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"]},
-                       horizonMin=p["horizonMin"], exitStyle=p.get("exit", "steady"))
+                       horizonMin=p["horizonMin"], exitStyle=p.get("exit", "runner"))
             raw1 = (candles_by_tf.get(1) or {}).get(seg) or []
             live1 = [c for c in raw1 if c["t"] <= now]                       # includes the forming minute
             fine = live1 if tf > 1 else [c for c in live1 if c["t"] + 60 > now]
@@ -541,16 +556,16 @@ def build(candles_by_tf, days=60, now=None, futures=None):
                        "which came first (SL or a target) is read from the minute path, not guessed inside a 5m/15m "
                        "candle; only if both are touched inside the same 1-minute candle is it counted as the stop. "
                        "(Where 1-minute history is missing, the signal candles are used and a double-touch counts as the stop.)",
-            "plan": "Exit styles (they change profit, never the win rate): Steady = 3 lots, book 1/3 at T1, T2, T3; "
-                    "Balanced = 2 lots, book one at T1 and hold the other; Runner = 1 lot, book nothing at T1, just move "
-                    "the stop to entry, and hold until the window ends. The stop always moves to entry once T1 is touched. "
-                    "Each index defaults to the style that tested best on older data. Before brokerage and slippage; index "
-                    "points, not option premium. 1-minute targets are only 9-67 points, so costs can erase most of that edge.",
-            "exitStyles": "Tested on 1,485 real calls: average profit per call in units of the stop rose from 0.206 to "
-                          "0.432 on the last 60 days (0.022 to 0.132 under a stricter assumption that a minute touching T1 "
-                          "and then falling back to entry is stopped) when each index uses its recommended style. The "
-                          "trade-off: Runner leaves about 6 in 10 calls ending near zero and relies on a few big trend "
-                          "moves; Nifty 5m and Bank Nifty 5m do better with Steady.",
+            "plan": "One position, no extra lots. Default rule (Runner): the stop moves to entry once T1 is touched and you hold "
+                    "until the window ends or the stop is hit. Profit changes with the rule, never the win rate. Before "
+                    "brokerage and slippage; index points, not option premium. 1-minute targets are only 9-67 points, so costs "
+                    "can erase most of that edge.",
+            "exitStyles": "Tested on 1,485 real calls: the single-lot Runner rule earned 0.227 R per call on older history and "
+                          "0.44 R on the last 60 days, versus 0.118 / 0.206 for the old 1/3-at-each-target plan. Even under a strict "
+                          "assumption (a minute that touches T1 and falls back to entry is stopped) it stays positive (+0.03 / "
+                          "+0.10 R). About 24% of calls are still full stop-outs and about 6 in 10 end near zero; a few big trend "
+                          "moves pay for them. Entry filters, other stop widths, other signal types and pullback / confirmation "
+                          "entries were all tested and did NOT reduce stop-outs without losing profit.",
             "risk": "T1 is deliberately close, which is what makes 70%+ wins possible, so a stop-out costs more than a "
                     "typical win. The edge is the win rate and profit factor, not a 4:1 payoff. 5m stops are about 0.4x "
                     "the final target; going lower (0.2-0.3x) dropped the win rate under 70% on the older history for "

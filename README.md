@@ -487,17 +487,19 @@ Render dashboard; to keep the service awake use a free uptime pinger (UptimeRobo
 
 Run it locally the same way: `docker build -t market-desk . && docker run --env-file .env -p 10000:10000 market-desk`.
 
-## Exit styles (short-term calls)
-How you manage a call once it is open changes your **profit**, never the win rate (a win is still "T1 reached before the stop").
-The stop always moves to entry once T1 is touched. Pick a style on the Short term page (default = the style that tested best per index):
+## Managing a short-term call (one lot, no partial booking)
+How the single position is managed once a call is open changes your **profit**, never the win rate (a win is still "T1 reached
+before the stop"). Pick a rule on the Short term page:
 
-| Style | Lots | What you do |
-|---|---|---|
-| Steady | 3 | book 1/3 at T1, T2, T3 |
-| Balanced | 2 | book 1 lot at T1, hold the other until the window ends |
-| Runner | 1 | book nothing at T1, just move the stop to entry, hold until the window ends |
+| Rule | What you do (one lot) |
+|---|---|
+| **Runner** (default) | move the stop to entry once T1 is touched, then hold until the window ends or the stop is hit |
+| Protect early | once price is +½ of T1, move the stop to entry + ¼ of T1, then hold - fewer full stop-outs, less robust |
+| Fixed T3 target | stop to entry after T1, take profit at T3 |
 
-Tested on 1,485 real calls (style chosen on older data, checked on the last 60 days): average profit per call in units of the stop
-rose from +0.206 to +0.432 (and +0.022 to +0.132 under a stricter assumption that a minute touching T1 and falling back to entry is
-stopped). Trade-off: with Runner about 6 in 10 calls end near zero and a few big trend moves pay for it. Nifty 5m and Bank Nifty 5m
-do better with Steady. Brokerage and slippage are not included.
+Backtest on 1,485 real calls (older history, then the last 60 days): Runner earned **0.227 R / 0.44 R per call versus 0.118 / 0.206**
+for the old "1/3 at each target" plan, and stays positive (+0.03 / +0.10 R) under a strict same-minute assumption. About 24% of calls are
+still full stop-outs and about 6 in 10 end near zero; a few big trend moves pay for them. I also tested entry filters (higher-timeframe
+agreement, volatility, trend strength, VWAP distance, candle shape, time of day), wider and tighter stops, breakout / opening-range /
+previous-day-level signals, and pullback / confirmation entries: none reduced stop-outs without losing profit or held up on the last
+60 days, so the entry and stops were left unchanged. Brokerage and slippage are not included.

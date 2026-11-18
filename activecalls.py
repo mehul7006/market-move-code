@@ -70,7 +70,7 @@ def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, no
         day_start = c["t"] - ((c["t"] + 19800) % 86400)
         wend = min(c["entryAt"] + p.get("horizonMin", 120) * 60, day_start + shortterm.SESSION_CLOSE_MIN * 60)
         touched = {k: c[k + "At"] for k in ("sl", "t1", "t2", "t3") if c.get(k + "At")}
-        status = "RUNNING" if c["result"] == "OPEN" else c["result"]
+        status = "RUNNING" if (c["result"] == "OPEN" or c.get("planAlive")) else c["result"]   # a runner is still open after T3
         rows.append(_row("short", c["segment"], c["name"], "%sm" % c["tf"], c["side"], c["entryAt"], c["entry"],
                          c["sl"], c["t1"], c["t2"], c["t3"], touched, status, wend, now,
                          (ltps.get(c["segment"]) or {}).get("last"), c.get("scoredOn"),
@@ -120,8 +120,9 @@ def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, no
         "isToday": bool(today_payload.get("isToday")), "ltp": ltps, "counts": cnt, "calls": rows,
         "istClock": datetime.datetime.fromtimestamp(now + 19800, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "notes": {
-            "running": "RUNNING = stop not touched, T3 not reached and the call's window (1-2 hours, or 15:25 for long term) "
-                       "has not ended. A call that touched T1 or T2 stays running until the stop, T3 or the window end.",
+            "running": "RUNNING = the call's stop has not been touched and its window (1-2 hours, or 15:25 for long term) has not "
+                       "ended. A short-term call that touched T1, T2 or T3 stays running: with the Runner rule you keep the single lot, "
+                       "stop at entry, until the window ends or the stop is hit.",
             "live": "Every running call is checked against the still-forming 1-minute candle and the latest traded price, "
                     "so a touch counts the moment it happens. If one minute touches both the stop and a target, it is "
                     "scored as the stop.",

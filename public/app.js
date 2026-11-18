@@ -1228,12 +1228,12 @@ function renderActive() {
 /* ------------------------------------------------------------------ generate calls: short term (1m / 5m / 15m / 30m) */
 
 let shortFilter = "all";
-let shortStyle = "rec";           // exit style used for the profit numbers: rec = each index's recommended style
-const EXIT_LABELS = { steady: "3 lots · Steady", balanced: "2 lots · Balanced", runner: "1 lot · Runner" };
+let shortStyle = "runner";        // how the single lot is managed once a call is open (no extra lots, no partial booking)
+const EXIT_LABELS = { runner: "Runner (recommended)", protect: "Protect early", target: "Fixed T3 target" };
 const EXIT_HELP = {
-  steady: "Book 1/3 at T1, 1/3 at T2, 1/3 at T3; stop moves to entry after T1. Most calls end in profit; smallest wins.",
-  balanced: "Book 1 lot at T1, hold the other until the window ends; stop moves to entry after T1. Most calls end in profit and the winners run further.",
-  runner: "Book nothing at T1 — just move the stop to entry — and hold until the window ends. Biggest average profit, but about 6 in 10 calls end near zero and a few big trend moves pay for it.",
+  runner: "One lot. Move the stop to entry once T1 is touched, then hold until the window ends or the stop is hit. Best average profit; about 6 in 10 calls end near zero and a few big moves pay for it.",
+  protect: "One lot. Once price is +½ of T1, move the stop to entry + ¼ of T1, then hold. Fewer full stop-outs, but less robust: its profit disappears if a minute that reaches the lock also falls back.",
+  target: "One lot. Move the stop to entry once T1 is touched and take profit at T3 (a fixed-target bracket). Simple, but earns clearly less than Runner.",
 };
 let shortData = null;
 let shortTf = "5";
@@ -1328,9 +1328,9 @@ function renderShort() {
   const pts = (x) => (x == null ? "—" : (x >= 0 ? "+" : "") + x);
   const t = blk.totals || {};
   const vsegs = blk.segments.filter((s) => s.validated && s.stats);
-  const M = (o) => (!o || shortStyle === "rec" || !o.styles ? o : (o.styles[shortStyle] || o));   // metrics for the chosen style
+  const M = (o) => (!o || !o.styles ? o : (o.styles[shortStyle] || o));   // metrics for the chosen rule
   const tm = M(t);
-  const styleName = shortStyle === "rec" ? "Recommended per index" : EXIT_LABELS[shortStyle];
+  const styleName = EXIT_LABELS[shortStyle];
 
   const isAll = shortTf === "all";
   const tfChips = ["all", "1", "5", "15", "30"].map((k) => {
@@ -1343,7 +1343,7 @@ function renderShort() {
   const segRows = vsegs.map((s) => { const m = M(s.stats); return `<tr>
       <td class="name">${esc(s.name)}${s.smallSample ? ' <span class="fc-badge">small sample</span>' : ""}
         <div class="fcs">${esc(s.familyLabel)}</div>
-        <div class="fcs">exit: ${esc(EXIT_LABELS[shortStyle === "rec" ? s.exitStyle : shortStyle] || "")}</div></td>
+        <div class="fcs">rule: ${esc(EXIT_LABELS[shortStyle] || "")}</div></td>
       <td class="num">T1 +${s.ladder.t1} · T2 +${s.ladder.t2} · T3 +${s.ladder.t3}<div class="fcs neg">SL −${s.ladder.sl} pts · ${s.horizonMin} min</div></td>
       <td class="num">${s.stats.calls}</td>
       <td class="num neg">${pc(s.stats.slRate)}<div class="fcs">${s.stats.SL} calls</div></td>
@@ -1363,7 +1363,7 @@ function renderShort() {
       <div class="fcs ${at && cls !== "neg" ? "pos" : ""}">${at ? "✓ " + clk(at) + " · within " + after + "m" : label}</div></td>`;
   const callRows = rows.map((r) => {
     const hitT = r.result === "T1" || r.result === "T2" || r.result === "T3";
-    const pl = (shortStyle === "rec" || !r.plans || !r.plans[shortStyle]) ? { pts: r.planPts, exitAt: r.planExitAt, reason: r.planReason } : r.plans[shortStyle];
+    const pl = (r.plans && r.plans[shortStyle]) ? r.plans[shortStyle] : { pts: r.planPts, exitAt: r.planExitAt, reason: r.planReason };
     const slLabel = r.slAt ? (hitT ? "touched later " + clk(r.slAt) + " (result unaffected)" : "") : "not touched";
     return `<tr>
       <td class="num">${esc(r.date.slice(5))}<div class="fcs">${r.entryAt ? clk(r.entryAt) : esc(r.time)} entry</div></td>
@@ -1431,21 +1431,20 @@ function renderShort() {
     patterns: "Candlestick patterns", volumeOi: "Volume & OI", honesty: "Honest caveat" };
   const styleRow = (k) => { const m = (t.styles || {})[k]; return m ? `<tr class="${shortStyle === k ? "sel" : ""}">
       <td class="name">${esc(EXIT_LABELS[k])}</td><td class="num ${(m.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(m.avgPlanPts)}</td>
-      <td class="num">${m.profitFactor ?? "—"}</td><td class="num">${m.avgWinPts ?? "—"} / ${m.avgLossPts ?? "—"}</td>
+      <td class="num">${m.profitFactor ?? "—"}</td><td class="num neg">${m.stopRate ?? "—"}%</td><td class="num">${m.avgWinPts ?? "—"} / ${m.avgLossPts ?? "—"}</td>
       <td class="num">${m.gainRate}% · ${m.scratchRate}% · ${m.lossRate}%</td><td class="fcs">${esc(EXIT_HELP[k])}</td></tr>` : ""; };
   const exitCard = `<div class="proof-card">
-      <div class="pf-h">Exit style — how you manage a call once it is open
+      <div class="pf-h">How to manage the call — one lot, no partial booking
         <span class="spacer"></span>
-        <button class="btn sh-style ${shortStyle === "rec" ? "btn-accent" : "ghost"}" data-s="rec">Recommended per index</button>
         ${Object.keys(EXIT_LABELS).map((k) => `<button class="btn sh-style ${shortStyle === k ? "btn-accent" : "ghost"}" data-s="${k}">${EXIT_LABELS[k]}</button>`).join(" ")}</div>
-      <div class="pf-note">The style changes your <b>profit</b>, not the win rate (a win is still “T1 reached before the stop”). In every style the stop moves
-        to entry once T1 is touched. The numbers below use <b>${esc(styleName)}</b>; each index's recommended style was picked from older data and then
-        checked on the last ${d.days} days.</div>
-      <div class="table-wrap"><table class="research pf-table"><thead><tr><th>Style</th><th>Avg pts / call</th><th>Profit factor</th>
+      <div class="pf-note">The rule changes your <b>profit</b>, not the win rate (a win is still “T1 reached before the stop”). The numbers on this page use
+        <b>${esc(styleName)}</b>. Everything I tried to cut stop-outs — entry filters, other stop widths, other signal types, pullback or confirmation
+        entries — either hurt profit or did not hold up on the last ${d.days} days, so the entry and stop are unchanged.</div>
+      <div class="table-wrap"><table class="research pf-table"><thead><tr><th>Rule</th><th>Avg pts / call</th><th>Profit factor</th><th>Full stop-outs</th>
         <th>Avg gain / avg loss (pts)</th><th>Calls gaining · ≈0 · losing</th><th>How it works</th></tr></thead>
-        <tbody>${["steady", "balanced", "runner"].map(styleRow).join("")}</tbody></table></div>
+        <tbody>${Object.keys(EXIT_LABELS).map(styleRow).join("")}</tbody></table></div>
       <div class="pf-note">“Calls gaining” made more than +0.1 of their stop, “losing” fell more than −0.1, “≈0” is in between (stopped at entry or closed flat).
-        Runner pays most on average but most of its calls end ≈0 — only choose it if you can sit through that. Brokerage and slippage are not included.</div>
+        Brokerage and slippage are not included; a minute that touches T1 and falls straight back to entry can stop a runner out earlier than the backtest assumes.</div>
     </div>`;
   const method = Object.entries(d.method || {}).map(([k, v]) => `<li><b>${esc(labels[k] || k)}:</b> ${esc(v)}</li>`).join("");
   const noEdge = (d.noEdge || []).map((x) => x.name).join(" and ");
@@ -1471,6 +1470,7 @@ function renderShort() {
         <div><span>Avg pts / call (${esc(styleName)})</span><b class="${(tm.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(tm.avgPlanPts)}</b></div>
         <div><span>Avg gain / avg loss (pts)</span><b>${tm.avgWinPts ?? "—"} / ${tm.avgLossPts ?? "—"}</b></div>
         <div><span>Calls gaining · ≈0 · losing</span><b>${tm.gainRate ?? "—"}% · ${tm.scratchRate ?? "—"}% · ${tm.lossRate ?? "—"}%</b></div>
+        <div><span>Full stop-outs (${esc(styleName)})</span><b class="neg">${tm.stopRate ?? "—"}%</b></div>
         <div><span>Median time to T1</span><b>${t.medianT1Min ?? "—"}m</b></div>
         <div><span>Median run before entry</span><b>${t.medianPreRun ?? "—"} pts</b></div>
       </div>` : `<div class="pf-note">No index has a validated strategy on ${shortTf}-minute candles, so no calls are issued here.
