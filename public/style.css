@@ -563,3 +563,6 @@ table.n5-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .topbar-right { gap: 8px; }
   .pf-stats { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* long badges (strategy ladder) must wrap inside their card */
+#shortBody .fc-badge, #activeBody .fc-badge, #scoreBody .fc-badge { white-space: normal; max-width: 100%; }

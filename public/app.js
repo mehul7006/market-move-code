@@ -1228,6 +1228,13 @@ function renderActive() {
 /* ------------------------------------------------------------------ generate calls: short term (1m / 5m / 15m / 30m) */
 
 let shortFilter = "all";
+let shortStyle = "rec";           // exit style used for the profit numbers: rec = each index's recommended style
+const EXIT_LABELS = { steady: "3 lots · Steady", balanced: "2 lots · Balanced", runner: "1 lot · Runner" };
+const EXIT_HELP = {
+  steady: "Book 1/3 at T1, 1/3 at T2, 1/3 at T3; stop moves to entry after T1. Most calls end in profit; smallest wins.",
+  balanced: "Book 1 lot at T1, hold the other until the window ends; stop moves to entry after T1. Most calls end in profit and the winners run further.",
+  runner: "Book nothing at T1 — just move the stop to entry — and hold until the window ends. Biggest average profit, but about 6 in 10 calls end near zero and a few big trend moves pay for it.",
+};
 let shortData = null;
 let shortTf = "5";
 
@@ -1321,6 +1328,9 @@ function renderShort() {
   const pts = (x) => (x == null ? "—" : (x >= 0 ? "+" : "") + x);
   const t = blk.totals || {};
   const vsegs = blk.segments.filter((s) => s.validated && s.stats);
+  const M = (o) => (!o || shortStyle === "rec" || !o.styles ? o : (o.styles[shortStyle] || o));   // metrics for the chosen style
+  const tm = M(t);
+  const styleName = shortStyle === "rec" ? "Recommended per index" : EXIT_LABELS[shortStyle];
 
   const isAll = shortTf === "all";
   const tfChips = ["all", "1", "5", "15", "30"].map((k) => {
@@ -1330,9 +1340,10 @@ function renderShort() {
   }).join(" ");
   const tfLabel = isAll ? "All candle sizes" : shortTf + "-minute";
 
-  const segRows = vsegs.map((s) => `<tr>
+  const segRows = vsegs.map((s) => { const m = M(s.stats); return `<tr>
       <td class="name">${esc(s.name)}${s.smallSample ? ' <span class="fc-badge">small sample</span>' : ""}
-        <div class="fcs">${esc(s.familyLabel)}</div></td>
+        <div class="fcs">${esc(s.familyLabel)}</div>
+        <div class="fcs">exit: ${esc(EXIT_LABELS[shortStyle === "rec" ? s.exitStyle : shortStyle] || "")}</div></td>
       <td class="num">T1 +${s.ladder.t1} · T2 +${s.ladder.t2} · T3 +${s.ladder.t3}<div class="fcs neg">SL −${s.ladder.sl} pts · ${s.horizonMin} min</div></td>
       <td class="num">${s.stats.calls}</td>
       <td class="num neg">${pc(s.stats.slRate)}<div class="fcs">${s.stats.SL} calls</div></td>
@@ -1340,10 +1351,10 @@ function renderShort() {
       <td class="num">${pc(s.stats.t2Rate)}<div class="fcs">${s.stats.T2} calls</div></td>
       <td class="num pos">${pc(s.stats.t3Rate)}<div class="fcs">${s.stats.T3} calls</div></td>
       <td class="num"><b class="${s.stats.winRate >= 70 ? "pos" : "neg"}">${pc(s.stats.winRate)}</b></td>
-      <td class="num ${(s.stats.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(s.stats.avgPlanPts)}<div class="fcs">PF ${s.stats.profitFactor ?? "—"}</div></td>
-      <td class="num">${s.stats.avgWinPts ?? "—"} / ${s.stats.avgLossPts ?? "—"}<div class="fcs">median ${s.stats.medianT1Min ?? "—"}m to T1</div></td>
-      <td class="num">${pc(s.older.winRate)}<div class="fcs">${s.older.calls} older calls · PF ${s.older.profitFactor ?? "—"}</div></td>
-    </tr>`).join("");
+      <td class="num ${(m.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(m.avgPlanPts)}<div class="fcs">PF ${m.profitFactor ?? "—"}</div></td>
+      <td class="num">${m.avgWinPts ?? "—"} / ${m.avgLossPts ?? "—"}<div class="fcs">${m.gainRate ?? "—"}% gain · ${m.scratchRate ?? "—"}% ≈0 · ${m.lossRate ?? "—"}% lose</div></td>
+      <td class="num">${pc(s.older.winRate)}<div class="fcs">${s.older.calls} older calls · PF ${M(s.older).profitFactor ?? "—"}</div></td>
+    </tr>`; }).join("");
 
   const filters = { all: "All", SL: "SL", T1: "T1 only", T2: "T2 only", T3: "T3", OPEN: "Open", TIMEOUT: "Timeout" };
   const rows = blk.calls.filter((r) => shortFilter === "all" || r.result === shortFilter);
@@ -1352,6 +1363,7 @@ function renderShort() {
       <div class="fcs ${at && cls !== "neg" ? "pos" : ""}">${at ? "✓ " + clk(at) + " · within " + after + "m" : label}</div></td>`;
   const callRows = rows.map((r) => {
     const hitT = r.result === "T1" || r.result === "T2" || r.result === "T3";
+    const pl = (shortStyle === "rec" || !r.plans || !r.plans[shortStyle]) ? { pts: r.planPts, exitAt: r.planExitAt, reason: r.planReason } : r.plans[shortStyle];
     const slLabel = r.slAt ? (hitT ? "touched later " + clk(r.slAt) + " (result unaffected)" : "") : "not touched";
     return `<tr>
       <td class="num">${esc(r.date.slice(5))}<div class="fcs">${r.entryAt ? clk(r.entryAt) : esc(r.time)} entry</div></td>
@@ -1364,8 +1376,8 @@ function renderShort() {
       ${lvl(r.t2, r.t2Pts_, r.t2At, r.t2After, "not reached", "")}
       ${lvl(r.t3, r.t3Pts_, r.t3At, r.t3After, "not reached", "")}
       <td>${shortBadge(r.result)}</td>
-      <td class="num ${(r.planPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(r.planPts)}<div class="fcs">T1-exit ${pts(r.t1ExitPts)}</div></td>
-      <td class="fcs">${r.planExitAt ? clk(r.planExitAt) + " · " : ""}${esc(r.planReason || "—")}</td>
+      <td class="num ${(pl.pts ?? 0) >= 0 ? "pos" : "neg"}">${pts(pl.pts)}<div class="fcs">T1-exit ${pts(r.t1ExitPts)}</div></td>
+      <td class="fcs">${pl.exitAt ? clk(pl.exitAt) + " · " : ""}${esc(pl.reason || "—")}</td>
       <td class="fcs">${(r.patterns || []).map(esc).join(", ") || "—"}</td>
     </tr>`;
   }).join("");
@@ -1415,8 +1427,26 @@ function renderShort() {
         target and the order cannot be known, it is scored as the SL.</div>
     </div>`;
 
-  const labels = { signal: "Signal", window: "Window", buckets: "Outcome buckets", plan: "Plan points", risk: "Risk / payoff",
+  const labels = { signal: "Signal", window: "Window", buckets: "Outcome buckets", plan: "Exit styles", exitStyles: "Exit style test", risk: "Risk / payoff",
     patterns: "Candlestick patterns", volumeOi: "Volume & OI", honesty: "Honest caveat" };
+  const styleRow = (k) => { const m = (t.styles || {})[k]; return m ? `<tr class="${shortStyle === k ? "sel" : ""}">
+      <td class="name">${esc(EXIT_LABELS[k])}</td><td class="num ${(m.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(m.avgPlanPts)}</td>
+      <td class="num">${m.profitFactor ?? "—"}</td><td class="num">${m.avgWinPts ?? "—"} / ${m.avgLossPts ?? "—"}</td>
+      <td class="num">${m.gainRate}% · ${m.scratchRate}% · ${m.lossRate}%</td><td class="fcs">${esc(EXIT_HELP[k])}</td></tr>` : ""; };
+  const exitCard = `<div class="proof-card">
+      <div class="pf-h">Exit style — how you manage a call once it is open
+        <span class="spacer"></span>
+        <button class="btn sh-style ${shortStyle === "rec" ? "btn-accent" : "ghost"}" data-s="rec">Recommended per index</button>
+        ${Object.keys(EXIT_LABELS).map((k) => `<button class="btn sh-style ${shortStyle === k ? "btn-accent" : "ghost"}" data-s="${k}">${EXIT_LABELS[k]}</button>`).join(" ")}</div>
+      <div class="pf-note">The style changes your <b>profit</b>, not the win rate (a win is still “T1 reached before the stop”). In every style the stop moves
+        to entry once T1 is touched. The numbers below use <b>${esc(styleName)}</b>; each index's recommended style was picked from older data and then
+        checked on the last ${d.days} days.</div>
+      <div class="table-wrap"><table class="research pf-table"><thead><tr><th>Style</th><th>Avg pts / call</th><th>Profit factor</th>
+        <th>Avg gain / avg loss (pts)</th><th>Calls gaining · ≈0 · losing</th><th>How it works</th></tr></thead>
+        <tbody>${["steady", "balanced", "runner"].map(styleRow).join("")}</tbody></table></div>
+      <div class="pf-note">“Calls gaining” made more than +0.1 of their stop, “losing” fell more than −0.1, “≈0” is in between (stopped at entry or closed flat).
+        Runner pays most on average but most of its calls end ≈0 — only choose it if you can sit through that. Brokerage and slippage are not included.</div>
+    </div>`;
   const method = Object.entries(d.method || {}).map(([k, v]) => `<li><b>${esc(labels[k] || k)}:</b> ${esc(v)}</li>`).join("");
   const noEdge = (d.noEdge || []).map((x) => x.name).join(" and ");
 
@@ -1428,6 +1458,7 @@ function renderShort() {
         A call is issued only where the strategy held ≥ ${d.target.winRate}% wins on older history <b>and</b> on the held-back last ${d.days} days.
         ${esc(noEdge)} had no reliable edge on any candle size.</div>
     </div>
+    ${t.calls ? exitCard : ""}
     <div class="proof-card">
       <div class="pf-h">${tfLabel} · last ${d.days} days · ${t.calls ?? 0} calls</div>
       ${t.calls ? `<div class="pf-stats">
@@ -1436,9 +1467,10 @@ function renderShort() {
         <div><span>T1 only</span><b>${pc(t.t1Rate)}</b></div>
         <div><span>T2 only</span><b>${pc(t.t2Rate)}</b></div>
         <div><span>T3</span><b class="pos">${pc(t.t3Rate)}</b></div>
-        <div><span>Profit factor</span><b>${t.profitFactor ?? "—"}</b></div>
-        <div><span>Avg pts / call (plan)</span><b class="${(t.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(t.avgPlanPts)}</b></div>
-        <div><span>Avg win / avg loss (pts)</span><b>${t.avgWinPts ?? "—"} / ${t.avgLossPts ?? "—"}</b></div>
+        <div><span>Profit factor</span><b>${tm.profitFactor ?? "—"}</b></div>
+        <div><span>Avg pts / call (${esc(styleName)})</span><b class="${(tm.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(tm.avgPlanPts)}</b></div>
+        <div><span>Avg gain / avg loss (pts)</span><b>${tm.avgWinPts ?? "—"} / ${tm.avgLossPts ?? "—"}</b></div>
+        <div><span>Calls gaining · ≈0 · losing</span><b>${tm.gainRate ?? "—"}% · ${tm.scratchRate ?? "—"}% · ${tm.lossRate ?? "—"}%</b></div>
         <div><span>Median time to T1</span><b>${t.medianT1Min ?? "—"}m</b></div>
         <div><span>Median run before entry</span><b>${t.medianPreRun ?? "—"} pts</b></div>
       </div>` : `<div class="pf-note">No index has a validated strategy on ${shortTf}-minute candles, so no calls are issued here.
@@ -1458,7 +1490,7 @@ function renderShort() {
       <div class="pf-h">By index — ${tfLabel}</div>
       <div class="table-wrap"><table class="research pf-table">
         <thead><tr><th>Index</th><th>Levels</th><th>Calls</th><th>SL</th><th>T1 only</th><th>T2 only</th><th>T3</th>
-          <th>Win</th><th>Avg pts · plan</th><th>Avg win / loss</th><th>Older months</th></tr></thead>
+          <th>Win</th><th>Avg pts / call</th><th>Avg gain / avg loss (pts)</th><th>Older months</th></tr></thead>
         <tbody>${segRows}</tbody></table></div>
       <div class="pf-note">Each call is counted once, at the highest target reached before the stop. "Older months" is the same
         strategy on the history before the last ${d.days} days, where it was chosen.</div>
@@ -1491,6 +1523,7 @@ function renderShort() {
   $("shortReload").onclick = openShort;
   $("shortCloseBtn").onclick = closeShort;
   document.querySelectorAll(".sh-f").forEach((b) => { b.onclick = () => { shortFilter = b.dataset.f; renderShort(); }; });
+  document.querySelectorAll(".sh-style").forEach((b) => { b.onclick = () => { shortStyle = b.dataset.s; renderShort(); }; });
   document.querySelectorAll(".sh-tf").forEach((b) => { b.onclick = () => { shortTf = b.dataset.tf; shortFilter = "all"; renderShort(); }; });
 }
 

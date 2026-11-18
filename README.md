@@ -486,3 +486,18 @@ Render dashboard; to keep the service awake use a free uptime pinger (UptimeRobo
 (about 744 h/month, inside Render's 750 free hours); live tracking refreshes about every 1-2 minutes on 0.1 CPU, not every 5 s.
 
 Run it locally the same way: `docker build -t market-desk . && docker run --env-file .env -p 10000:10000 market-desk`.
+
+## Exit styles (short-term calls)
+How you manage a call once it is open changes your **profit**, never the win rate (a win is still "T1 reached before the stop").
+The stop always moves to entry once T1 is touched. Pick a style on the Short term page (default = the style that tested best per index):
+
+| Style | Lots | What you do |
+|---|---|---|
+| Steady | 3 | book 1/3 at T1, T2, T3 |
+| Balanced | 2 | book 1 lot at T1, hold the other until the window ends |
+| Runner | 1 | book nothing at T1, just move the stop to entry, hold until the window ends |
+
+Tested on 1,485 real calls (style chosen on older data, checked on the last 60 days): average profit per call in units of the stop
+rose from +0.206 to +0.432 (and +0.022 to +0.132 under a stricter assumption that a minute touching T1 and falling back to entry is
+stopped). Trade-off: with Runner about 6 in 10 calls end near zero and a few big trend moves pay for it. Nifty 5m and Bank Nifty 5m
+do better with Steady. Brokerage and slippage are not included.

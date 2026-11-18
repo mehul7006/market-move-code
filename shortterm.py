@@ -52,19 +52,34 @@ def _p(seg, tf, family, bias, t1, t2, t3, sl, horizon_min, **kw):
     return d
 
 
+# Exit styles: how the position is managed once a call is open. They change the PROFIT, never the win rate (a win is
+# still "T1 reached before the stop"). In every style the stop moves to entry once T1 is touched.
+#   steady   3 lots: book 1/3 at T1, 1/3 at T2, 1/3 at T3                 (the original plan)
+#   balanced 2 lots: book 1 lot at T1, hold the other until the window ends
+#   runner   1 lot : book nothing at T1 - just move the stop to entry - and hold until the window ends
+# Backtest on 1,485 real calls (older history for the choice, last 60 days to check): average profit per call, in units
+# of the stop, went 0.206 -> 0.432 (and 0.022 -> 0.132 under a stricter same-minute assumption) when each index uses
+# its recommended style. The cost: with runner, about 6 in 10 calls end near zero and a few big trend moves pay for it.
+EXIT_STYLES = {
+    "steady": [("t1", 1 / 3), ("t2", 1 / 3), ("t3", 1 / 3)],
+    "balanced": [("t1", 0.5), (None, 0.5)],
+    "runner": [("t1", 0.0), (None, 1.0)],
+}
+EXIT_LABELS = {"steady": "3 lots · Steady", "balanced": "2 lots · Balanced", "runner": "1 lot · Runner"}
+
 # (segment, candle minutes) -> strategy. Pairs not listed issue no calls.
 STRATEGIES = {
-    ("NIFTY", 1): _p("NIFTY", 1, "vwapx", "trend", 9, 15, 22, 15, 60),
-    ("BANKNIFTY", 1): _p("BANKNIFTY", 1, "vwapx", "trend", 13, 32, 63, 44, 120),
-    ("SENSEX", 1): _p("SENSEX", 1, "vwapx", "strong", 20, 47, 67, 47, 120),
+    ("NIFTY", 1): _p("NIFTY", 1, "vwapx", "trend", 9, 15, 22, 15, 60, exit="balanced"),
+    ("BANKNIFTY", 1): _p("BANKNIFTY", 1, "vwapx", "trend", 13, 32, 63, 44, 120, exit="balanced"),
+    ("SENSEX", 1): _p("SENSEX", 1, "vwapx", "strong", 20, 47, 67, 47, 120, exit="runner"),
     # 5m / 15m stops were re-tuned with outcomes scored on the real 1-minute path (see module docstring): stops sit at
     # ~0.3-0.4x the final target. Each held >= 70% wins on the older history AND on the held-back last 60 days.
     ("NIFTY", 5): _p("NIFTY", 5, "vwapx", "strong", 8, 35, 50, 15, 120),
     ("BANKNIFTY", 5): _p("BANKNIFTY", 5, "vwapx", "strong", 14, 98, 140, 42, 120),
-    ("SENSEX", 5): _p("SENSEX", 5, "vwapx", "strong", 22, 105, 150, 60, 120),
-    ("NEXT50", 5): _p("NEXT50", 5, "vwapx", "trend", 24, 112, 160, 64, 120),
-    ("SENSEX", 15): _p("SENSEX", 15, "vwapx", "strong", 26, 182, 260, 78, 120, smallSample=True),
-    ("NEXT50", 15): _p("NEXT50", 15, "vwapx", "trend", 28, 194, 277, 83, 120, smallSample=True),
+    ("SENSEX", 5): _p("SENSEX", 5, "vwapx", "strong", 22, 105, 150, 60, 120, exit="runner"),
+    ("NEXT50", 5): _p("NEXT50", 5, "vwapx", "trend", 24, 112, 160, 64, 120, exit="runner"),
+    ("SENSEX", 15): _p("SENSEX", 15, "vwapx", "strong", 26, 182, 260, 78, 120, smallSample=True, exit="runner"),
+    ("NEXT50", 15): _p("NEXT50", 15, "vwapx", "trend", 28, 194, 277, 83, 120, smallSample=True, exit="runner"),
 }
 
 # what testing found where a pair has no strategy (shown to the user instead of an invented call)
@@ -229,9 +244,10 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
             path = path + tail
     stopped, maxhit, stop_t, hit_t = False, 0, None, {}
     mfe = 0.0
-    planstop, planopen, plan_pts, plan_alive = -sl, [[t1, 1 / 3], [t2, 1 / 3], [t3, 1 / 3]], 0.0, True
+    lvl = {"t1": t1, "t2": t2, "t3": t3, None: None}
+    plans = {k: {"stop": -sl, "open": [[lvl[tg], fr] for tg, fr in legs], "pts": 0.0, "alive": True, "endT": None,
+                 "reason": None} for k, legs in EXIT_STYLES.items()}
     t1_pts, t1_done = 0.0, False
-    plan_end_t, plan_reason = None, None
     for c in path:
         hi = (c["high"] - entry) * sign if sign > 0 else (entry - c["low"])
         lo = (c["low"] - entry) if sign > 0 else (entry - c["high"])
@@ -250,21 +266,22 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
                 t1_pts, t1_done = -sl, True
             elif hi >= t1:
                 t1_pts, t1_done = t1, True
-        if plan_alive:
-            if lo <= planstop:
-                plan_pts += sum(f for _, f in planopen) * planstop
-                plan_reason = ("Stop moved to entry after T1 - touched" if planstop >= 0
-                               else "Stop loss touched")
-                planopen, plan_alive, plan_end_t = [], False, c["t"]
-            else:
-                for leg in list(planopen):
-                    if hi >= leg[0]:
-                        plan_pts += leg[1] * leg[0]
-                        planopen.remove(leg)
-                        if leg[0] >= t1:
-                            planstop = max(planstop, 0.0)
-                if not planopen:
-                    plan_alive, plan_end_t, plan_reason = False, c["t"], "All three targets booked"
+        for pl in plans.values():
+            if not pl["alive"]:
+                continue
+            if lo <= pl["stop"]:                      # stop first inside a candle
+                pl["pts"] += sum(f for _, f in pl["open"]) * pl["stop"]
+                pl["reason"] = "Stop moved to entry after T1 - touched" if pl["stop"] >= 0 else "Stop loss touched"
+                pl["open"], pl["alive"], pl["endT"] = [], False, c["t"]
+                continue
+            for leg in list(pl["open"]):
+                if leg[0] is not None and hi >= leg[0]:
+                    pl["pts"] += leg[1] * leg[0]
+                    pl["open"].remove(leg)
+                    if leg[0] == t1:
+                        pl["stop"] = max(pl["stop"], 0.0)     # stop to entry once T1 is touched (next candle onward)
+            if not pl["open"]:
+                pl["alive"], pl["endT"], pl["reason"] = False, c["t"], "All targets booked"
     complete = ((end + 1 < n) or cs[end]["t"] >= deadline
                 or cs[end]["t"] + tf * 60 >= day_start + SESSION_CLOSE_MIN * 60
                 or (now is not None and now >= wfull))
@@ -278,10 +295,11 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
         bucket = "SL"
     else:
         bucket = "TIMEOUT"
-    if plan_alive:
-        plan_pts += sum(f for _, f in planopen) * last
-        plan_end_t = path[-1]["t"] if path else None
-        plan_reason = "Still open" if bucket == "OPEN" else "Window ended - closed at last price"
+    for pl in plans.values():
+        if pl["alive"]:
+            pl["pts"] += sum(f for _, f in pl["open"]) * last
+            pl["endT"] = path[-1]["t"] if path else None
+            pl["reason"] = "Still open" if bucket == "OPEN" else "Window ended - closed at last price"
     if not t1_done:
         t1_pts = last
 
@@ -290,11 +308,12 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     dec_t = stop_t if bucket == "SL" else hit_t.get(maxhit)
     return {"bucket": bucket, "endIdx": end, "mfe": _round(mfe, 1), "res": res,
             "live": bool(path) and now is not None and (path[-1]["t"] + 60 > now if res == "1m" else False),
-            "planPts": _round(plan_pts, 1), "t1Pts": _round(t1_pts, 1),
+            "plans": {k: {"pts": _round(v["pts"], 1), "exitAt": v["endT"], "exitAfter": after(v["endT"]),
+                          "reason": v["reason"]} for k, v in plans.items()},
+            "t1Pts": _round(t1_pts, 1),
             "t1At": hit_t.get(1), "t2At": hit_t.get(2), "t3At": hit_t.get(3), "slAt": stop_t,
             "t1After": after(hit_t.get(1)), "t2After": after(hit_t.get(2)), "t3After": after(hit_t.get(3)),
             "slAfter": after(stop_t), "minutes": after(dec_t),
-            "planExitAt": plan_end_t, "planExitAfter": after(plan_end_t), "planReason": plan_reason,
             "exit": _round(entry + sign * (
                 -sl if bucket == "SL" else {1: t1, 2: t2, 3: t3}.get(maxhit, last)), 2)}
 
@@ -331,6 +350,8 @@ def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
         bull, bear = patterns(cs, i, F["atr"][i])
         pb, pr = patterns(cs, i - 1, F["atr"][i - 1])
         mine = (bull + pb) if s > 0 else (bear + pr)
+        style = p.get("exit", "steady")
+        pr = tr["plans"][style]
         out.append({
             "segment": p["seg"], "tf": tf, "name": p["name"], "t": cs[i]["t"],
             "date": stamp.strftime("%Y-%m-%d"), "time": stamp.strftime("%H:%M"),
@@ -342,14 +363,36 @@ def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
             "t1Min": tr["t1After"], "entryAt": cs[i]["t"] + tf * 60,
             "t1At": tr["t1At"], "t2At": tr["t2At"], "t3At": tr["t3At"], "slAt": tr["slAt"],
             "t1After": tr["t1After"], "t2After": tr["t2After"], "t3After": tr["t3After"],
-            "slAfter": tr["slAfter"], "planExitAt": tr["planExitAt"], "planReason": tr["planReason"],
-            "planExitAfter": tr["planExitAfter"],
-            "exit": tr["exit"], "mfe": tr["mfe"], "planPts": tr["planPts"], "t1ExitPts": tr["t1Pts"],
+            "slAfter": tr["slAfter"], "exitStyle": style, "plans": tr["plans"],
+            "planExitAt": pr["exitAt"], "planReason": pr["reason"], "planExitAfter": pr["exitAfter"],
+            "exit": tr["exit"], "mfe": tr["mfe"], "planPts": pr["pts"], "t1ExitPts": tr["t1Pts"],
             "live": tr["live"], "id": "%s-%s-%s" % (p["seg"], tf, cs[i]["t"]),
             "preRun": _round((e - cs[i - lookback]["close"]) * s, 1),
             "patterns": sorted(set(mine)),
         })
     return out
+
+
+def _pts_stats(closed, getter):
+    """Profit statistics for one way of managing the trades. A call 'gains' when it makes more than +0.1 of its stop,
+    'loses' when it falls more than -0.1 of its stop, and is a 'scratch' (about zero) in between."""
+    pts = [(getter(r), r["slPts"]) for r in closed]
+    n = len(pts)
+    gains = [p for p, sl in pts if p > 0.1 * sl]
+    loses = [-p for p, sl in pts if p < -0.1 * sl]
+    scr = n - len(gains) - len(loses)
+    wins_sum = sum(p for p, _ in pts if p > 0)
+    loss_sum = sum(-p for p, _ in pts if p <= 0)
+    return {
+        "avgPlanPts": round(sum(p for p, _ in pts) / n, 1) if n else None,
+        "totalPlanPts": round(sum(p for p, _ in pts), 1) if n else 0,
+        "avgWinPts": round(sum(gains) / len(gains), 1) if gains else None,       # average of the calls that gained
+        "avgLossPts": round(sum(loses) / len(loses), 1) if loses else None,      # average of the calls that lost
+        "gainRate": round(len(gains) / n * 100, 1) if n else None,
+        "scratchRate": round(scr / n * 100, 1) if n else None,
+        "lossRate": round(len(loses) / n * 100, 1) if n else None,
+        "profitFactor": round(wins_sum / loss_sum, 2) if loss_sum else None,
+    }
 
 
 def summarize(calls):
@@ -360,25 +403,21 @@ def summarize(calls):
 
     def rate(x, d=n):
         return round(x / d * 100, 1) if d else None
-    wins = [r["planPts"] for r in closed if r["planPts"] > 0]
-    losses = [-r["planPts"] for r in closed if r["planPts"] <= 0]
     t1m = [r["t1Min"] for r in closed if r.get("t1Min")]
     pre = [r["preRun"] for r in closed if r.get("preRun") is not None]
-    return {
+    out = {
         "calls": n, "SL": c["SL"], "T1": c["T1"], "T2": c["T2"], "T3": c["T3"],
         "timeouts": c["TIMEOUT"], "open": c["OPEN"],
         "slRate": rate(c["SL"], len(closed)), "t1Rate": rate(c["T1"], len(closed)),
         "t2Rate": rate(c["T2"], len(closed)), "t3Rate": rate(c["T3"], len(closed)),
         "winRate": rate(anyt, len(closed)),
-        "avgPlanPts": round(sum(r["planPts"] for r in closed) / len(closed), 1) if closed else None,
-        "totalPlanPts": round(sum(r["planPts"] for r in closed), 1) if closed else 0,
         "avgT1ExitPts": round(sum(r["t1ExitPts"] for r in closed) / len(closed), 1) if closed else None,
-        "avgWinPts": round(sum(wins) / len(wins), 1) if wins else None,
-        "avgLossPts": round(sum(losses) / len(losses), 1) if losses else None,
-        "profitFactor": round(sum(wins) / sum(losses), 2) if losses and sum(losses) else None,
         "medianT1Min": round(statistics.median(t1m)) if t1m else None,
         "medianPreRun": round(statistics.median(pre), 1) if pre else None,
     }
+    out.update(_pts_stats(closed, lambda r: r["planPts"]))          # each call's recommended exit style
+    out["styles"] = {k: _pts_stats(closed, lambda r, k=k: r["plans"][k]["pts"]) for k in EXIT_STYLES} if closed else {}
+    return out
 
 
 def live_read(cs, tf, p):
@@ -452,7 +491,7 @@ def build(candles_by_tf, days=60, now=None, futures=None):
             ent.update(family=p["family"],
                        familyLabel="VWAP reclaim in a trend" if p["family"] == "vwapx" else "Trend pullback resume",
                        ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"]},
-                       horizonMin=p["horizonMin"])
+                       horizonMin=p["horizonMin"], exitStyle=p.get("exit", "steady"))
             raw1 = (candles_by_tf.get(1) or {}).get(seg) or []
             live1 = [c for c in raw1 if c["t"] <= now]                       # includes the forming minute
             fine = live1 if tf > 1 else [c for c in live1 if c["t"] + 60 > now]
@@ -502,9 +541,16 @@ def build(candles_by_tf, days=60, now=None, futures=None):
                        "which came first (SL or a target) is read from the minute path, not guessed inside a 5m/15m "
                        "candle; only if both are touched inside the same 1-minute candle is it counted as the stop. "
                        "(Where 1-minute history is missing, the signal candles are used and a double-touch counts as the stop.)",
-            "plan": "Plan points = book 1/3 at each of T1/T2/T3, stop moves to entry once T1 is hit. "
-                    "Before brokerage and slippage; index points, not option premium. 1-minute targets are only "
-                    "9-67 points, so costs can erase most of that edge.",
+            "plan": "Exit styles (they change profit, never the win rate): Steady = 3 lots, book 1/3 at T1, T2, T3; "
+                    "Balanced = 2 lots, book one at T1 and hold the other; Runner = 1 lot, book nothing at T1, just move "
+                    "the stop to entry, and hold until the window ends. The stop always moves to entry once T1 is touched. "
+                    "Each index defaults to the style that tested best on older data. Before brokerage and slippage; index "
+                    "points, not option premium. 1-minute targets are only 9-67 points, so costs can erase most of that edge.",
+            "exitStyles": "Tested on 1,485 real calls: average profit per call in units of the stop rose from 0.206 to "
+                          "0.432 on the last 60 days (0.022 to 0.132 under a stricter assumption that a minute touching T1 "
+                          "and then falling back to entry is stopped) when each index uses its recommended style. The "
+                          "trade-off: Runner leaves about 6 in 10 calls ending near zero and relies on a few big trend "
+                          "moves; Nifty 5m and Bank Nifty 5m do better with Steady.",
             "risk": "T1 is deliberately close, which is what makes 70%+ wins possible, so a stop-out costs more than a "
                     "typical win. The edge is the win rate and profit factor, not a 4:1 payoff. 5m stops are about 0.4x "
                     "the final target; going lower (0.2-0.3x) dropped the win rate under 70% on the older history for "
