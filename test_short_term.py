@@ -166,20 +166,34 @@ def main():
             tag = " (not issued)" if tf == 30 else ""
             P(f"| {tf}m{tag} | {label} | **{len(wins) / n * 100:.1f}%** | {stop / n * 100:.1f}% | {sum(pts) / n:+.1f} | {sum(wp) / len(wp) if wp else 0:+.1f} |")
     P("")
-    P("## T1 = SL (tuned per index and candle) - per index, single lot Runner")
-    P("| Candle | Index | T1 = SL (pts) | Calls | Win rate (T1 before SL) | Full stop-outs | Avg points / call | Avg points of a winning call | Total points |")
-    P("|---|---|---|---|---|---|---|---|---|")
+    P("## NET average per call - ALL calls, losses subtracted from profits (single lot)")
+    P("Real expectancy = (sum of every call's profit and loss) / number of calls. **Target** = T1 = SL = Nifty 25 / Sensex 75 / Bank Nifty 75 / Next 50 80; **Tuned** = equal T1 = SL per index and candle; **High win rate** = small-T1 ladder.")
+    P("| Candle | Index | Profile | T1 = SL | Calls | Win rate | Full stop-outs | **NET avg pts per call (Runner)** | NET (exit at T1 or stop) | Avg of a winning call | Net pts per day | Total pts |")
+    P("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    sessions = len({c["date"] for tf_ in (1, 5, 15) for c in summary[tf_]}) or 1
     for tf in (1, 5, 15):
         for seg in S5:
-            cc = [c for c in summary[tf] if c["segment"] == seg and "eq" in c["variants"]]
-            if not cc:
-                continue
-            ws = [c for c in cc if c["variants"]["eq"]["win"]]
-            pts = [c["variants"]["eq"]["pts"] for c in cc]
-            wp = [c["variants"]["eq"]["pts"] for c in ws]
-            stop = sum(1 for c in cc if c["variants"]["eq"]["kind"] == "SL")
-            P(f"| {tf}m | {seg} | {cc[0]['variants']['eq']['slPts']} | {len(cc)} | **{len(ws) / len(cc) * 100:.1f}%** | {stop / len(cc) * 100:.1f}% | "
-              f"{sum(pts) / len(cc):+.1f} | {sum(wp) / len(wp) if wp else 0:+.1f} | {sum(pts):+.0f} |")
+            for key, label in (("tgt", "Target"), ("eq", "Tuned"), ("cur", "High win rate")):
+                cc = [c for c in summary[tf] if c["segment"] == seg and (key == "cur" or key in c["variants"])]
+                if not cc:
+                    continue
+                if key == "cur":
+                    win = lambda c: c["result"] in ("T1", "T2", "T3")
+                    pts = [c["plans"]["runner"]["pts"] for c in cc]
+                    kind = lambda c: c["plans"]["runner"]["kind"]
+                    t1p = lambda c: c["t1Pts_"]; slp = lambda c: c["slPts"]; xs = f"{cc[0]['t1Pts_']}/{cc[0]['slPts']}"
+                else:
+                    v = lambda c, key=key: c["variants"][key]
+                    win = lambda c, v=v: v(c)["win"]
+                    pts = [v(c)["pts"] for c in cc]
+                    kind = lambda c, v=v: v(c)["kind"]
+                    t1p = lambda c, v=v: v(c)["t1Pts"]; slp = lambda c, v=v: v(c)["slPts"]; xs = f"{v(cc[0])['t1Pts']}"
+                ws = [c for c in cc if win(c)]
+                br = [(t1p(c) if win(c) else -slp(c) if kind(c) == "SL" else p) for c, p in zip(cc, pts)]
+                wp = [p for c, p in zip(cc, pts) if win(c)]
+                stop = sum(1 for c in cc if kind(c) == "SL")
+                P(f"| {tf}m | {seg} | {label} | {xs} | {len(cc)} | {len(ws) / len(cc) * 100:.1f}% | {stop / len(cc) * 100:.1f}% | **{sum(pts) / len(cc):+.1f}** | {sum(br) / len(cc):+.1f} | "
+                  f"{sum(wp) / len(wp) if wp else 0:+.1f} | {sum(pts) / sessions:+.1f} | {sum(pts):+.0f} |")
     P("")
     P("## The same calls, counted three ways (this is why 'average per call' numbers differ so much)")
     P("- **Hindsight average** = the best price reached after each call, averaged. It is NOT tradeable: nobody can sell every call at its exact top. Many 'average per call' claims are built this way.")

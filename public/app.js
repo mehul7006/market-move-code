@@ -1228,8 +1228,8 @@ function renderActive() {
 /* ------------------------------------------------------------------ generate calls: short term (1m / 5m / 15m / 30m) */
 
 let shortFilter = "all";
-let shortLadder = "cur";          // T1 size: cur = shipped (T1 about 1/4-1/2 of the stop), "0.75" = 3/4 of the stop, "1" = equal to the stop
-const LADDER_LABELS = { cur: "Current (T1 ≈ ¼–½ of stop)", "0.75": "T1 = ¾ of stop", "1": "T1 = stop", eq: "T1 = SL (tuned per index)" };
+let shortLadder = "tgt";          // T1 size: cur = shipped (T1 about 1/4-1/2 of the stop), "0.75" = 3/4 of the stop, "1" = equal to the stop
+const LADDER_LABELS = { tgt: "Target: T1 = SL (Nifty 25 · Sensex & Bank Nifty 75)", cur: "High win rate (T1 ≈ ¼–½ of stop)", "0.75": "T1 = ¾ of stop", "1": "T1 = stop", eq: "T1 = SL (tuned per index)" };
 let shortStyle = "runner";        // how the single lot is managed once a call is open (no extra lots, no partial booking)
 const EXIT_LABELS = { runner: "Runner (recommended)", protect: "Protect early", target: "Fixed T3 target" };
 const EXIT_HELP = {
@@ -1348,7 +1348,7 @@ function renderShort() {
       <td class="name">${esc(s.name)}${s.smallSample ? ' <span class="fc-badge">small sample</span>' : ""}
         <div class="fcs">${esc(s.familyLabel)}</div>
         <div class="fcs">rule: ${esc(EXIT_LABELS[shortStyle] || "")}</div></td>
-      <td class="num">${shortLadder === "eq" ? `T1 +${s.ladder.eqx} · SL −${s.ladder.eqx}` : `T1 +${lad ? Math.round(Number(shortLadder) * s.ladder.sl) : s.ladder.t1} · T2 +${s.ladder.t2} · T3 +${s.ladder.t3}`}<div class="fcs neg">${shortLadder === "eq" ? "" : `SL −${s.ladder.sl} pts · `}${s.horizonMin} min</div></td>
+      <td class="num">${shortLadder === "tgt" ? `T1 +${s.ladder.tgtx} · T2 +${2 * s.ladder.tgtx} · T3 +${3 * s.ladder.tgtx}` : shortLadder === "eq" ? `T1 +${s.ladder.eqx} · SL −${s.ladder.eqx}` : `T1 +${lad ? Math.round(Number(shortLadder) * s.ladder.sl) : s.ladder.t1} · T2 +${s.ladder.t2} · T3 +${s.ladder.t3}`}<div class="fcs neg">${shortLadder === "tgt" ? `SL −${s.ladder.tgtx} pts · ` : shortLadder === "eq" ? "" : `SL −${s.ladder.sl} pts · `}${s.horizonMin} min</div></td>
       <td class="num">${s.stats.calls}</td>
       <td class="num neg">${pc(lad ? m.stopRate : s.stats.slRate)}<div class="fcs">${lad ? "" : s.stats.SL + " calls"}</div></td>
       <td class="num">${lad ? "—" : pc(s.stats.t1Rate)}<div class="fcs">${lad ? "" : s.stats.T1 + " calls"}</div></td>
@@ -1381,8 +1381,8 @@ function renderShort() {
       ${vr && vr.sl != null ? lvl(vr.sl, vr.slPts, vr.kind === "SL" ? vr.slAt : null, vr.slAfter, "not touched", "neg")
         : lvl(r.sl, r.slPts, (vr ? vr.kind === "SL" : r.result === "SL") ? r.slAt : null, r.slAfter, slLabel, "neg")}
       ${vr ? lvl(vr.t1, vr.t1Pts, vr.t1At, vr.t1After, "not reached", "pos") : lvl(r.t1, r.t1Pts_, r.t1At, r.t1After, "not reached", "pos")}
-      ${lvl(r.t2, r.t2Pts_, r.t2At, r.t2After, "not reached", "")}
-      ${lvl(r.t3, r.t3Pts_, r.t3At, r.t3After, "not reached", "")}
+      ${vr && vr.t2 != null ? lvl(vr.t2, vr.t2Pts, vr.t2At, vr.t2After, "not reached", "") : lvl(r.t2, r.t2Pts_, r.t2At, r.t2After, "not reached", "")}
+      ${vr && vr.t3 != null ? lvl(vr.t3, vr.t3Pts, vr.t3At, vr.t3After, "not reached", "") : lvl(r.t3, r.t3Pts_, r.t3At, r.t3After, "not reached", "")}
       <td>${vr ? shortBadge(vr.win ? "T1" : (vr.kind === "SL" ? "SL" : "TIMEOUT")) : shortBadge(r.result)}</td>
       <td class="num ${(pl.pts ?? 0) >= 0 ? "pos" : "neg"}">${pts(pl.pts)}<div class="fcs">${vr ? "Runner · bigger T1" : "T1-exit " + pts(r.t1ExitPts)}</div></td>
       <td class="fcs">${pl.exitAt ? clk(pl.exitAt) + " · " : ""}${esc(pl.reason || "—")}</td>
@@ -1443,20 +1443,22 @@ function renderShort() {
       <td class="num">${m.gainRate}% · ${m.scratchRate}% · ${m.lossRate}%</td><td class="fcs">${esc(EXIT_HELP[k])}</td></tr>` : ""; };
   const ladRow = (k) => { const m = (t.ladders || {})[k]; return m ? `<tr class="${shortLadder === k ? "sel" : ""}">
       <td class="name">${esc(LADDER_LABELS[k])}</td><td class="num"><b class="${m.winRate >= 70 ? "pos" : "neg"}">${pc(m.winRate)}</b></td>
-      <td class="num neg">${pc(m.stopRate)}</td><td class="num ${(m.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(m.avgPlanPts)}</td>
-      <td class="num pos">${m.avgWinCallPts ?? "—"}</td><td class="num">${m.profitFactor ?? "—"}</td></tr>` : ""; };
+      <td class="num neg">${pc(m.stopRate)}</td><td class="num ${(m.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}"><b>${pts(m.avgPlanPts)}</b></td><td class="num ${(m.bracketAvgPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(m.bracketAvgPts)}</td>
+      <td class="num pos">${m.avgWinCallPts ?? "—"}</td><td class="num">${m.avgBookPts ?? "—"}</td>
+      <td class="num">${m.profitFactor ?? "—"}</td></tr>` : ""; };
   const ladderCard = `<div class="proof-card">
       <div class="pf-h">Target size — how far T1 is from entry compared with the stop
         <span class="spacer"></span>
-        ${["cur", "1", "eq"].map((k) => `<button class="btn sh-lad ${shortLadder === k ? "btn-accent" : "ghost"}" data-l="${k}">${LADDER_LABELS[k]}</button>`).join(" ")}</div>
-      <div class="pf-note">Same calls, same stop, single lot with the Runner rule — only the size of T1 changes. A bigger T1 makes a winning call pay more, but T1 is then
+        ${["tgt", "cur", "eq"].map((k) => `<button class="btn sh-lad ${shortLadder === k ? "btn-accent" : "ghost"}" data-l="${k}">${LADDER_LABELS[k]}</button>`).join(" ")}</div>
+      <div class="pf-note"><b>Target (default):</b> T1 and the stop are the same size — Nifty 25, Sensex 75, Bank Nifty 75 (same as Sensex), Next 50 80 — with T2 = 2× and T3 = 3×,
+        so a winning call books at least that much and Runner lets it run further. The price is a lower win rate (about 55–63%, not 70%+) and about 40% stop-outs, so the
+        profit per call over ALL calls is small. <b>Judge by the NET average per call (all calls, losses subtracted)</b>, not the average winning call. <b>High win rate</b> is the earlier setup (T1 a fraction of the stop).<br>Same calls, single lot with the Runner rule — only the size of T1 and the stop change. A bigger T1 makes a winning call pay more, but T1 is then
         harder to reach first, so the <b>win rate falls</b>. This is basic probability: asking a trade to gain as much as it risks wins about half the time unless the edge is
         huge. Entry filters and new signal types (opening-range, breakout, previous-day levels) were tested and did <b>not</b> bring it back to 70%, so the shipped
-        default keeps T1 small. <b>T1 = SL (tuned per index)</b> sets T1 and the stop to the same number of points, picked per index and candle from older
-        history and then checked on the unseen last 60 days (about 61% wins pooled). Pick the trade-off you prefer.</div>
-      <div class="table-wrap"><table class="research pf-table"><thead><tr><th>T1 size</th><th>Win rate (T1 before SL)</th><th>Full stop-outs</th>
-        <th>Avg pts / call</th><th>Avg pts of a winning call</th><th>Profit factor</th></tr></thead>
-        <tbody>${["cur", "0.75", "1", "eq"].map(ladRow).join("")}</tbody></table></div>
+        default keeps T1 small. <b>Tuned</b> picks the equal T1 = SL size per index and candle from older history (about 61% wins on the unseen last 60 days). Pick the trade-off you prefer.</div>
+      <div class="table-wrap"><table class="research pf-table"><thead><tr><th>Profile</th><th>Win rate (T1 before SL)</th><th>Full stop-outs</th>
+        <th><b>NET avg pts per call</b> (all calls, losses subtracted · Runner)</th><th>NET if you exit at T1 or the stop</th><th>Avg of a winning call only</th><th>…if you sell at T1</th><th>Profit factor</th></tr></thead>
+        <tbody>${["tgt", "cur", "eq"].map(ladRow).join("")}</tbody></table></div>
     </div>`;
   const exitCard = `<div class="proof-card">
       <div class="pf-h">How to manage the call — one lot, no partial booking
@@ -1489,11 +1491,11 @@ function renderShort() {
       ${t.calls ? `<div class="pf-stats">
         <div><span>Win (${lad ? "T1 before SL, " + esc(LADDER_LABELS[shortLadder]) : "any target before SL"})</span><b class="${(lad ? tm.winRate : t.winRate) >= 70 ? "pos" : "neg"}">${pc(lad ? tm.winRate : t.winRate)}</b></div>
         <div><span>SL first</span><b class="neg">${pc(lad ? tm.stopRate : t.slRate)}</b></div>
-        ${lad ? `<div><span>Avg pts of a winning call</span><b class="pos">${tm.avgWinCallPts ?? "—"}</b></div>` : `<div><span>T1 only</span><b>${pc(t.t1Rate)}</b></div>
+        ${lad ? `<div><span>Avg pts of a WINNING call (Runner)</span><b class="pos">${tm.avgWinCallPts ?? "—"}</b><div class="fcs">sell at T1: +${tm.avgBookPts ?? "—"}</div></div>` : `<div><span>T1 only</span><b>${pc(t.t1Rate)}</b></div>
         <div><span>T2 only</span><b>${pc(t.t2Rate)}</b></div>
         <div><span>T3</span><b class="pos">${pc(t.t3Rate)}</b></div>`}
         <div><span>Profit factor</span><b>${tm.profitFactor ?? "—"}</b></div>
-        <div><span>Avg pts / call (${esc(styleName)})</span><b class="${(tm.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(tm.avgPlanPts)}</b></div>
+        <div><span><b>NET avg pts per call</b> — all calls, losses subtracted (${esc(styleName)})</span><b class="${(tm.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(tm.avgPlanPts)}</b></div>
         <div><span>Avg gain / avg loss (pts)</span><b>${tm.avgWinPts ?? "—"} / ${tm.avgLossPts ?? "—"}</b></div>
         <div><span>Calls gaining · ≈0 · losing</span><b>${tm.gainRate ?? "—"}% · ${tm.scratchRate ?? "—"}% · ${tm.lossRate ?? "—"}%</b></div>
         <div><span>Full stop-outs (${esc(styleName)})</span><b class="neg">${tm.stopRate ?? "—"}%</b></div>

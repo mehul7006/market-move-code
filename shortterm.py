@@ -74,6 +74,10 @@ EXIT_STYLES = tuple(MANAGE)
 # points; breakout / opening-range / previous-day signals win 45-51% at T1 = stop). So the bigger T1 sizes are offered as a CHOICE,
 # computed on the same calls with the single-lot Runner rule, never as the default.
 LADDER_RATIOS = (0.75, 1.0)
+# TARGET profile (the page default): T1 = SL = X points, T2 = 2X, T3 = 3X. X is set so that a WINNING call books a meaningful amount:
+# Nifty 25, Sensex 75, Bank Nifty 75 (same as Sensex), Next 50 80. Measured on real calls this gives an average win of about +24 to +30
+# on Nifty and +69 to +108 on Sensex, at the price of a lower win rate (about 55-63%, not 70%+) and about 40% stop-outs.
+TARGET_X = {"NIFTY": 25, "BANKNIFTY": 75, "SENSEX": 75, "NEXT50": 80}
 # "eq" = T1 and the stop BOTH equal to `eqx` points (own stop, own T1), tuned per index and candle size from OLDER history only
 # (win rate >= 55%, best average points), then checked on the unseen last 60 days: pooled 61.1% wins over 429 calls. No size,
 # filter, new signal type, volume/OI feature or machine-learning gate reached 65-70% wins at T1 = SL (see README), so this is
@@ -330,6 +334,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     def variant(t1v, slv):
         """Single-lot Runner with its own T1 and stop on the SAME real path (stop first inside a minute; stop to entry after T1)."""
         vstop, mx, t1_t, vpts, vkind, vend = -slv, 0.0, None, None, None, None
+        t2_t = t3_t = None
         for c in path:
             vhi, vlo = ((c["high"] - entry, c["low"] - entry) if sign > 0 else (entry - c["low"], entry - c["high"]))
             if vlo <= vstop:
@@ -337,12 +342,19 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
                 break
             if vhi >= t1v and t1_t is None:
                 t1_t = c["t"]
+            if vhi >= 2 * t1v and t2_t is None:
+                t2_t = c["t"]
+            if vhi >= 3 * t1v and t3_t is None:
+                t3_t = c["t"]
             mx = max(mx, vhi)
             if mx >= t1v:
                 vstop = max(vstop, 0.0)
         else:
             vpts, vkind, vend = last, "END", (path[-1]["t"] if path else None)
         return {"t1": _round(entry + sign * t1v, 2), "t1Pts": _round(t1v, 1), "t1At": t1_t, "t1After": after(t1_t),
+                "t2": _round(entry + sign * 2 * t1v, 2), "t2Pts": _round(2 * t1v, 1), "t2At": t2_t, "t2After": after(t2_t),
+                "t3": _round(entry + sign * 3 * t1v, 2), "t3Pts": _round(3 * t1v, 1), "t3At": t3_t, "t3After": after(t3_t),
+                "best": 3 if t3_t else 2 if t2_t else 1 if t1_t else 0,
                 "sl": _round(entry - sign * slv, 2), "slPts": _round(slv, 1), "slAt": vend if vkind == "SL" else None,
                 "slAfter": after(vend) if vkind == "SL" else None,
                 "win": t1_t is not None, "pts": _round(vpts, 1), "kind": vkind, "exitAt": vend,
@@ -350,6 +362,8 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     variants = {("%g" % r): variant(r * sl, sl) for r in LADDER_RATIOS}
     if p.get("eqx"):
         variants["eq"] = variant(p["eqx"], p["eqx"])
+    if TARGET_X.get(p["seg"]):
+        variants["tgt"] = variant(TARGET_X[p["seg"]], TARGET_X[p["seg"]])
     return {"bucket": bucket, "endIdx": end, "mfe": _round(mfe, 1), "res": res,
             "live": bool(path) and now is not None and (path[-1]["t"] + 60 > now if res == "1m" else False),
             "plans": {k: {"pts": _round(v["pts"], 1), "exitAt": v["endT"], "exitAfter": after(v["endT"]),
@@ -466,20 +480,30 @@ def summarize(calls):
     out.update(_pts_stats(closed, lambda r: r["planPts"], lambda r: r["plans"][r["exitStyle"]]["kind"]))   # default rule
     out["styles"] = {k: _pts_stats(closed, lambda r, k=k: r["plans"][k]["pts"], lambda r, k=k: r["plans"][k]["kind"])
                      for k in EXIT_STYLES} if closed else {}
-    # the same calls with a bigger T1 (single-lot Runner): win rate = T1 touched before the stop
+    # the same calls under other T1 / stop sizes (single-lot Runner): win rate = T1 touched before the stop
     out["ladders"] = {}
     if closed and all("variants" in r for r in closed):
-        for key in ["cur"] + ["%g" % r for r in LADDER_RATIOS] + (["eq"] if all("eq" in r["variants"] for r in closed) else []):
+        keys = ["cur"] + ["%g" % r for r in LADDER_RATIOS] + [k for k in ("tgt", "eq") if all(k in r["variants"] for r in closed)]
+        for key in keys:
             if key == "cur":
-                g = _pts_stats(closed, lambda r: r["plans"]["runner"]["pts"], lambda r: r["plans"]["runner"]["kind"])
-                wins = [r for r in closed if r["result"] in ("T1", "T2", "T3")]
-                g["winRate"] = round(len(wins) / len(closed) * 100, 1)
-                g["avgWinCallPts"] = round(sum(r["plans"]["runner"]["pts"] for r in wins) / len(wins), 1) if wins else None
+                runner = lambda r: r["plans"]["runner"]["pts"]
+                kind = lambda r: r["plans"]["runner"]["kind"]
+                win = lambda r: r["result"] in ("T1", "T2", "T3")
+                t1p = lambda r: r["t1Pts_"]
+                slp = lambda r: r["slPts"]
             else:
-                g = _pts_stats(closed, lambda r, key=key: r["variants"][key]["pts"], lambda r, key=key: r["variants"][key]["kind"])
-                wins = [r for r in closed if r["variants"][key]["win"]]
-                g["winRate"] = round(len(wins) / len(closed) * 100, 1)
-                g["avgWinCallPts"] = round(sum(r["variants"][key]["pts"] for r in wins) / len(wins), 1) if wins else None
+                runner = lambda r, key=key: r["variants"][key]["pts"]
+                kind = lambda r, key=key: r["variants"][key]["kind"]
+                win = lambda r, key=key: r["variants"][key]["win"]
+                t1p = lambda r, key=key: r["variants"][key]["t1Pts"]
+                slp = lambda r, key=key: r["variants"][key]["slPts"]
+            g = _pts_stats(closed, runner, kind)
+            wins = [r for r in closed if win(r)]
+            g["winRate"] = round(len(wins) / len(closed) * 100, 1)
+            g["avgWinCallPts"] = round(sum(runner(r) for r in wins) / len(wins), 1) if wins else None      # Runner: what a winning call books
+            g["avgBookPts"] = round(sum(t1p(r) for r in wins) / len(wins), 1) if wins else None            # if you sell everything at T1
+            br = [(t1p(r) if win(r) else -slp(r) if kind(r) == "SL" else runner(r)) for r in closed]
+            g["bracketAvgPts"] = round(sum(br) / len(br), 1)                                                # exit at T1 or the stop
             out["ladders"][key] = g
     return out
 
@@ -554,7 +578,7 @@ def build(candles_by_tf, days=60, now=None, futures=None):
                 continue
             ent.update(family=p["family"],
                        familyLabel="VWAP reclaim in a trend" if p["family"] == "vwapx" else "Trend pullback resume",
-                       ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"], "eqx": p.get("eqx")},
+                       ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"], "eqx": p.get("eqx"), "tgtx": TARGET_X.get(p["seg"])},
                        horizonMin=p["horizonMin"], exitStyle=p.get("exit", "runner"))
             raw1 = (candles_by_tf.get(1) or {}).get(seg) or []
             live1 = [c for c in raw1 if c["t"] <= now]                       # includes the forming minute
