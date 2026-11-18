@@ -478,18 +478,40 @@ def _hist_1m(inst):
         return bars
 
     rows = {c["t"]: c for c in cached(f"hist1m:{inst['id']}", 1800, fetch)}
-    # Today's bars only ever grow: a failed or short intraday fetch must never make already-seen minutes vanish
-    # (that would make today's calls flicker in and out).
-    store = _i1m_store.setdefault(inst["id"], {"day": None, "rows": {}})
-    stamp = str(_ist_today())
-    if store["day"] != stamp:
-        store["day"], store["rows"] = stamp, {}
+    # Minute bars this app has already seen (today's session, and the last few days) are kept and saved, because Upstox's
+    # historical endpoint can lag by hours after the session ends (and after midnight it returns nothing for the day that
+    # just finished). Bars only ever grow, so a failed or short fetch can never make seen minutes vanish.
+    store = _i1m_store.setdefault(inst["id"], {"rows": {}, "loaded": False, "saved": 0})
+    spath = os.path.join(CACHE_DIR, f"intra1m_{inst['id']}.json")
+    if not store["loaded"]:
+        store["loaded"] = True
+        try:
+            with open(spath) as fh:
+                for c in json.load(fh):
+                    store["rows"][c["t"]] = c
+            store["saved"] = len(store["rows"])
+        except Exception:
+            pass
     try:
         for c in cached(f"intra1m:{inst['id']}", 3, lambda: UX.intraday(inst["key"], "minutes", 1)):
             store["rows"][c["t"]] = c
     except Exception:
         pass
-    rows.update(store["rows"])
+    cutoff = time.time() - 5 * 86400
+    for t in [t for t in store["rows"] if t < cutoff]:
+        del store["rows"][t]
+    if len(store["rows"]) - store["saved"] >= 20:
+        try:
+            os.makedirs(os.path.dirname(spath), exist_ok=True)
+            with open(spath, "w") as fh:
+                json.dump(sorted(store["rows"].values(), key=lambda c: c["t"]), fh)
+            store["saved"] = len(store["rows"])
+        except Exception:
+            pass
+    today0 = int(time.time() - ((time.time() + 19800) % 86400))
+    for t, c in store["rows"].items():
+        if t >= today0 or t not in rows:        # today's bars come from the live feed; older ones only fill gaps in history
+            rows[t] = c
     return [rows[t] for t in sorted(rows)]
 
 

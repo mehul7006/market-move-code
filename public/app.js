@@ -1228,6 +1228,8 @@ function renderActive() {
 /* ------------------------------------------------------------------ generate calls: short term (1m / 5m / 15m / 30m) */
 
 let shortFilter = "all";
+let shortLadder = "cur";          // T1 size: cur = shipped (T1 about 1/4-1/2 of the stop), "0.75" = 3/4 of the stop, "1" = equal to the stop
+const LADDER_LABELS = { cur: "Current (T1 ≈ ¼–½ of stop)", "0.75": "T1 = ¾ of stop", "1": "T1 = stop", eq: "T1 = SL (tuned per index)" };
 let shortStyle = "runner";        // how the single lot is managed once a call is open (no extra lots, no partial booking)
 const EXIT_LABELS = { runner: "Runner (recommended)", protect: "Protect early", target: "Fixed T3 target" };
 const EXIT_HELP = {
@@ -1329,7 +1331,9 @@ function renderShort() {
   const t = blk.totals || {};
   const vsegs = blk.segments.filter((s) => s.validated && s.stats);
   const M = (o) => (!o || !o.styles ? o : (o.styles[shortStyle] || o));   // metrics for the chosen rule
-  const tm = M(t);
+  const lad = shortLadder !== "cur";
+  const LM = (o) => (lad && o && o.ladders && o.ladders[shortLadder]) ? o.ladders[shortLadder] : M(o);   // metrics for the chosen T1 size
+  const tm = LM(t);
   const styleName = EXIT_LABELS[shortStyle];
 
   const isAll = shortTf === "all";
@@ -1340,17 +1344,17 @@ function renderShort() {
   }).join(" ");
   const tfLabel = isAll ? "All candle sizes" : shortTf + "-minute";
 
-  const segRows = vsegs.map((s) => { const m = M(s.stats); return `<tr>
+  const segRows = vsegs.map((s) => { const m = LM(s.stats); return `<tr>
       <td class="name">${esc(s.name)}${s.smallSample ? ' <span class="fc-badge">small sample</span>' : ""}
         <div class="fcs">${esc(s.familyLabel)}</div>
         <div class="fcs">rule: ${esc(EXIT_LABELS[shortStyle] || "")}</div></td>
-      <td class="num">T1 +${s.ladder.t1} · T2 +${s.ladder.t2} · T3 +${s.ladder.t3}<div class="fcs neg">SL −${s.ladder.sl} pts · ${s.horizonMin} min</div></td>
+      <td class="num">${shortLadder === "eq" ? `T1 +${s.ladder.eqx} · SL −${s.ladder.eqx}` : `T1 +${lad ? Math.round(Number(shortLadder) * s.ladder.sl) : s.ladder.t1} · T2 +${s.ladder.t2} · T3 +${s.ladder.t3}`}<div class="fcs neg">${shortLadder === "eq" ? "" : `SL −${s.ladder.sl} pts · `}${s.horizonMin} min</div></td>
       <td class="num">${s.stats.calls}</td>
-      <td class="num neg">${pc(s.stats.slRate)}<div class="fcs">${s.stats.SL} calls</div></td>
-      <td class="num">${pc(s.stats.t1Rate)}<div class="fcs">${s.stats.T1} calls</div></td>
-      <td class="num">${pc(s.stats.t2Rate)}<div class="fcs">${s.stats.T2} calls</div></td>
-      <td class="num pos">${pc(s.stats.t3Rate)}<div class="fcs">${s.stats.T3} calls</div></td>
-      <td class="num"><b class="${s.stats.winRate >= 70 ? "pos" : "neg"}">${pc(s.stats.winRate)}</b></td>
+      <td class="num neg">${pc(lad ? m.stopRate : s.stats.slRate)}<div class="fcs">${lad ? "" : s.stats.SL + " calls"}</div></td>
+      <td class="num">${lad ? "—" : pc(s.stats.t1Rate)}<div class="fcs">${lad ? "" : s.stats.T1 + " calls"}</div></td>
+      <td class="num">${lad ? "—" : pc(s.stats.t2Rate)}<div class="fcs">${lad ? "" : s.stats.T2 + " calls"}</div></td>
+      <td class="num pos">${lad ? "—" : pc(s.stats.t3Rate)}<div class="fcs">${lad ? "" : s.stats.T3 + " calls"}</div></td>
+      <td class="num"><b class="${(lad ? m.winRate : s.stats.winRate) >= 70 ? "pos" : "neg"}">${pc(lad ? m.winRate : s.stats.winRate)}</b></td>
       <td class="num ${(m.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(m.avgPlanPts)}<div class="fcs">PF ${m.profitFactor ?? "—"}</div></td>
       <td class="num">${m.avgWinPts ?? "—"} / ${m.avgLossPts ?? "—"}<div class="fcs">${m.gainRate ?? "—"}% gain · ${m.scratchRate ?? "—"}% ≈0 · ${m.lossRate ?? "—"}% lose</div></td>
       <td class="num">${pc(s.older.winRate)}<div class="fcs">${s.older.calls} older calls · PF ${M(s.older).profitFactor ?? "—"}</div></td>
@@ -1363,7 +1367,10 @@ function renderShort() {
       <div class="fcs ${at && cls !== "neg" ? "pos" : ""}">${at ? "✓ " + clk(at) + " · within " + after + "m" : label}</div></td>`;
   const callRows = rows.map((r) => {
     const hitT = r.result === "T1" || r.result === "T2" || r.result === "T3";
-    const pl = (r.plans && r.plans[shortStyle]) ? r.plans[shortStyle] : { pts: r.planPts, exitAt: r.planExitAt, reason: r.planReason };
+    const vr = lad && r.variants ? r.variants[shortLadder] : null;
+    const vReason = { SL: "Stop loss touched", BE: "Stop moved to entry after T1 - touched", END: "Window ended - closed at last price" };
+    const pl = vr ? { pts: vr.pts, exitAt: vr.exitAt, reason: vReason[vr.kind] || "—" }
+      : (r.plans && r.plans[shortStyle]) ? r.plans[shortStyle] : { pts: r.planPts, exitAt: r.planExitAt, reason: r.planReason };
     const slLabel = r.slAt ? (hitT ? "touched later " + clk(r.slAt) + " (result unaffected)" : "") : "not touched";
     return `<tr>
       <td class="num">${esc(r.date.slice(5))}<div class="fcs">${r.entryAt ? clk(r.entryAt) : esc(r.time)} entry</div></td>
@@ -1371,12 +1378,13 @@ function renderShort() {
       <td class="name">${esc(r.segment)}</td>
       <td>${r.side === "BUY" ? '<span class="pos">▲ BUY</span>' : '<span class="neg">▼ SELL</span>'}</td>
       <td class="num">${fmt(r.entry)}</td>
-      ${lvl(r.sl, r.slPts, r.result === "SL" ? r.slAt : null, r.slAfter, slLabel, "neg")}
-      ${lvl(r.t1, r.t1Pts_, r.t1At, r.t1After, "not reached", "pos")}
+      ${vr && vr.sl != null ? lvl(vr.sl, vr.slPts, vr.kind === "SL" ? vr.slAt : null, vr.slAfter, "not touched", "neg")
+        : lvl(r.sl, r.slPts, (vr ? vr.kind === "SL" : r.result === "SL") ? r.slAt : null, r.slAfter, slLabel, "neg")}
+      ${vr ? lvl(vr.t1, vr.t1Pts, vr.t1At, vr.t1After, "not reached", "pos") : lvl(r.t1, r.t1Pts_, r.t1At, r.t1After, "not reached", "pos")}
       ${lvl(r.t2, r.t2Pts_, r.t2At, r.t2After, "not reached", "")}
       ${lvl(r.t3, r.t3Pts_, r.t3At, r.t3After, "not reached", "")}
-      <td>${shortBadge(r.result)}</td>
-      <td class="num ${(pl.pts ?? 0) >= 0 ? "pos" : "neg"}">${pts(pl.pts)}<div class="fcs">T1-exit ${pts(r.t1ExitPts)}</div></td>
+      <td>${vr ? shortBadge(vr.win ? "T1" : (vr.kind === "SL" ? "SL" : "TIMEOUT")) : shortBadge(r.result)}</td>
+      <td class="num ${(pl.pts ?? 0) >= 0 ? "pos" : "neg"}">${pts(pl.pts)}<div class="fcs">${vr ? "Runner · bigger T1" : "T1-exit " + pts(r.t1ExitPts)}</div></td>
       <td class="fcs">${pl.exitAt ? clk(pl.exitAt) + " · " : ""}${esc(pl.reason || "—")}</td>
       <td class="fcs">${(r.patterns || []).map(esc).join(", ") || "—"}</td>
     </tr>`;
@@ -1433,6 +1441,23 @@ function renderShort() {
       <td class="name">${esc(EXIT_LABELS[k])}</td><td class="num ${(m.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(m.avgPlanPts)}</td>
       <td class="num">${m.profitFactor ?? "—"}</td><td class="num neg">${m.stopRate ?? "—"}%</td><td class="num">${m.avgWinPts ?? "—"} / ${m.avgLossPts ?? "—"}</td>
       <td class="num">${m.gainRate}% · ${m.scratchRate}% · ${m.lossRate}%</td><td class="fcs">${esc(EXIT_HELP[k])}</td></tr>` : ""; };
+  const ladRow = (k) => { const m = (t.ladders || {})[k]; return m ? `<tr class="${shortLadder === k ? "sel" : ""}">
+      <td class="name">${esc(LADDER_LABELS[k])}</td><td class="num"><b class="${m.winRate >= 70 ? "pos" : "neg"}">${pc(m.winRate)}</b></td>
+      <td class="num neg">${pc(m.stopRate)}</td><td class="num ${(m.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(m.avgPlanPts)}</td>
+      <td class="num pos">${m.avgWinCallPts ?? "—"}</td><td class="num">${m.profitFactor ?? "—"}</td></tr>` : ""; };
+  const ladderCard = `<div class="proof-card">
+      <div class="pf-h">Target size — how far T1 is from entry compared with the stop
+        <span class="spacer"></span>
+        ${["cur", "1", "eq"].map((k) => `<button class="btn sh-lad ${shortLadder === k ? "btn-accent" : "ghost"}" data-l="${k}">${LADDER_LABELS[k]}</button>`).join(" ")}</div>
+      <div class="pf-note">Same calls, same stop, single lot with the Runner rule — only the size of T1 changes. A bigger T1 makes a winning call pay more, but T1 is then
+        harder to reach first, so the <b>win rate falls</b>. This is basic probability: asking a trade to gain as much as it risks wins about half the time unless the edge is
+        huge. Entry filters and new signal types (opening-range, breakout, previous-day levels) were tested and did <b>not</b> bring it back to 70%, so the shipped
+        default keeps T1 small. <b>T1 = SL (tuned per index)</b> sets T1 and the stop to the same number of points, picked per index and candle from older
+        history and then checked on the unseen last 60 days (about 61% wins pooled). Pick the trade-off you prefer.</div>
+      <div class="table-wrap"><table class="research pf-table"><thead><tr><th>T1 size</th><th>Win rate (T1 before SL)</th><th>Full stop-outs</th>
+        <th>Avg pts / call</th><th>Avg pts of a winning call</th><th>Profit factor</th></tr></thead>
+        <tbody>${["cur", "0.75", "1", "eq"].map(ladRow).join("")}</tbody></table></div>
+    </div>`;
   const exitCard = `<div class="proof-card">
       <div class="pf-h">How to manage the call — one lot, no partial booking
         <span class="spacer"></span>
@@ -1457,15 +1482,16 @@ function renderShort() {
         A call is issued only where the strategy held ≥ ${d.target.winRate}% wins on older history <b>and</b> on the held-back last ${d.days} days.
         ${esc(noEdge)} had no reliable edge on any candle size.</div>
     </div>
+    ${t.calls ? ladderCard : ""}
     ${t.calls ? exitCard : ""}
     <div class="proof-card">
       <div class="pf-h">${tfLabel} · last ${d.days} days · ${t.calls ?? 0} calls</div>
       ${t.calls ? `<div class="pf-stats">
-        <div><span>Win (any target before SL)</span><b class="${t.winRate >= 70 ? "pos" : "neg"}">${pc(t.winRate)}</b></div>
-        <div><span>SL first</span><b class="neg">${pc(t.slRate)}</b></div>
-        <div><span>T1 only</span><b>${pc(t.t1Rate)}</b></div>
+        <div><span>Win (${lad ? "T1 before SL, " + esc(LADDER_LABELS[shortLadder]) : "any target before SL"})</span><b class="${(lad ? tm.winRate : t.winRate) >= 70 ? "pos" : "neg"}">${pc(lad ? tm.winRate : t.winRate)}</b></div>
+        <div><span>SL first</span><b class="neg">${pc(lad ? tm.stopRate : t.slRate)}</b></div>
+        ${lad ? `<div><span>Avg pts of a winning call</span><b class="pos">${tm.avgWinCallPts ?? "—"}</b></div>` : `<div><span>T1 only</span><b>${pc(t.t1Rate)}</b></div>
         <div><span>T2 only</span><b>${pc(t.t2Rate)}</b></div>
-        <div><span>T3</span><b class="pos">${pc(t.t3Rate)}</b></div>
+        <div><span>T3</span><b class="pos">${pc(t.t3Rate)}</b></div>`}
         <div><span>Profit factor</span><b>${tm.profitFactor ?? "—"}</b></div>
         <div><span>Avg pts / call (${esc(styleName)})</span><b class="${(tm.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(tm.avgPlanPts)}</b></div>
         <div><span>Avg gain / avg loss (pts)</span><b>${tm.avgWinPts ?? "—"} / ${tm.avgLossPts ?? "—"}</b></div>
@@ -1523,7 +1549,8 @@ function renderShort() {
   $("shortReload").onclick = openShort;
   $("shortCloseBtn").onclick = closeShort;
   document.querySelectorAll(".sh-f").forEach((b) => { b.onclick = () => { shortFilter = b.dataset.f; renderShort(); }; });
-  document.querySelectorAll(".sh-style").forEach((b) => { b.onclick = () => { shortStyle = b.dataset.s; renderShort(); }; });
+  document.querySelectorAll(".sh-lad").forEach((b) => { b.onclick = () => { shortLadder = b.dataset.l; if (shortLadder !== "cur") shortStyle = "runner"; renderShort(); }; });
+  document.querySelectorAll(".sh-style").forEach((b) => { b.onclick = () => { shortStyle = b.dataset.s; shortLadder = "cur"; renderShort(); }; });
   document.querySelectorAll(".sh-tf").forEach((b) => { b.onclick = () => { shortTf = b.dataset.tf; shortFilter = "all"; renderShort(); }; });
 }
 

@@ -68,21 +68,31 @@ MANAGE = {
     "target": {"be_trig": 1.0, "be_off": 0.0, "tp": "t3"},
 }
 EXIT_STYLES = tuple(MANAGE)
+# T1 SIZE. The shipped ladders keep T1 at roughly 1/4 - 1/2 of the stop, which is what holds 70%+ wins. Making T1 as big as the
+# stop doubles what a winning call pays but cannot keep the win rate: on 1,485 real calls the win rate (T1 before the stop) went
+# 70.8% -> 64.0% -> 57.5% as T1/stop went 0.5 -> 0.75 -> 1.0, and no entry filter or new signal type restored it (best filters +2-5
+# points; breakout / opening-range / previous-day signals win 45-51% at T1 = stop). So the bigger T1 sizes are offered as a CHOICE,
+# computed on the same calls with the single-lot Runner rule, never as the default.
+LADDER_RATIOS = (0.75, 1.0)
+# "eq" = T1 and the stop BOTH equal to `eqx` points (own stop, own T1), tuned per index and candle size from OLDER history only
+# (win rate >= 55%, best average points), then checked on the unseen last 60 days: pooled 61.1% wins over 429 calls. No size,
+# filter, new signal type, volume/OI feature or machine-learning gate reached 65-70% wins at T1 = SL (see README), so this is
+# offered as a choice with its real win rate beside it, never as the default.
 EXIT_LABELS = {"runner": "Runner (recommended)", "protect": "Protect early", "target": "Fixed T3 target"}
 
 # (segment, candle minutes) -> strategy. Pairs not listed issue no calls.
 STRATEGIES = {
-    ("NIFTY", 1): _p("NIFTY", 1, "vwapx", "trend", 9, 15, 22, 15, 60),
-    ("BANKNIFTY", 1): _p("BANKNIFTY", 1, "vwapx", "trend", 13, 32, 63, 44, 120),
-    ("SENSEX", 1): _p("SENSEX", 1, "vwapx", "strong", 20, 47, 67, 47, 120),
+    ("NIFTY", 1): _p("NIFTY", 1, "vwapx", "trend", 9, 15, 22, 15, 60, eqx=15),
+    ("BANKNIFTY", 1): _p("BANKNIFTY", 1, "vwapx", "trend", 13, 32, 63, 44, 120, eqx=44),
+    ("SENSEX", 1): _p("SENSEX", 1, "vwapx", "strong", 20, 47, 67, 47, 120, eqx=103),
     # 5m / 15m stops were re-tuned with outcomes scored on the real 1-minute path (see module docstring): stops sit at
     # ~0.3-0.4x the final target. Each held >= 70% wins on the older history AND on the held-back last 60 days.
-    ("NIFTY", 5): _p("NIFTY", 5, "vwapx", "strong", 8, 35, 50, 15, 120),
-    ("BANKNIFTY", 5): _p("BANKNIFTY", 5, "vwapx", "strong", 14, 98, 140, 42, 120),
-    ("SENSEX", 5): _p("SENSEX", 5, "vwapx", "strong", 22, 105, 150, 60, 120),
-    ("NEXT50", 5): _p("NEXT50", 5, "vwapx", "trend", 24, 112, 160, 64, 120),
-    ("SENSEX", 15): _p("SENSEX", 15, "vwapx", "strong", 26, 182, 260, 78, 120, smallSample=True),
-    ("NEXT50", 15): _p("NEXT50", 15, "vwapx", "trend", 28, 194, 277, 83, 120, smallSample=True),
+    ("NIFTY", 5): _p("NIFTY", 5, "vwapx", "strong", 8, 35, 50, 15, 120, eqx=15),
+    ("BANKNIFTY", 5): _p("BANKNIFTY", 5, "vwapx", "strong", 14, 98, 140, 42, 120, eqx=42),
+    ("SENSEX", 5): _p("SENSEX", 5, "vwapx", "strong", 22, 105, 150, 60, 120, eqx=48),
+    ("NEXT50", 5): _p("NEXT50", 5, "vwapx", "trend", 24, 112, 160, 64, 120, eqx=64),
+    ("SENSEX", 15): _p("SENSEX", 15, "vwapx", "strong", 26, 182, 260, 78, 120, smallSample=True, eqx=20),
+    ("NEXT50", 15): _p("NEXT50", 15, "vwapx", "trend", 28, 194, 277, 83, 120, smallSample=True, eqx=54),
 }
 
 # what testing found where a pair has no strategy (shown to the user instead of an invented call)
@@ -233,7 +243,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     # way to "now" on the 1-minute path INCLUDING the still-forming minute, so a touch counts the moment the
     # minute's high/low reaches a level, without waiting for any candle to complete.
     wfull = min(cs[i]["t"] + (p["horizon"] + 1) * tf * 60, day_start + SESSION_CLOSE_MIN * 60)
-    covered_to = cs[end]["t"] + tf * 60
+    covered_to = min(cs[end]["t"] + tf * 60, day_start + SESSION_CLOSE_MIN * 60)   # the last 30m candle ends after the close
     path, step, res = cs[i + 1:end + 1], tf * 60, "%sm" % tf
     if fine and tf > 1:
         a, b = bisect.bisect_left(fine_t, te), bisect.bisect_left(fine_t, wfull)
@@ -316,11 +326,35 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     def after(t):                              # minutes after entry by which the level had been touched
         return int((t - te) // 60 + step // 60) if t else None
     dec_t = stop_t if bucket == "SL" else hit_t.get(maxhit)
+
+    def variant(t1v, slv):
+        """Single-lot Runner with its own T1 and stop on the SAME real path (stop first inside a minute; stop to entry after T1)."""
+        vstop, mx, t1_t, vpts, vkind, vend = -slv, 0.0, None, None, None, None
+        for c in path:
+            vhi, vlo = ((c["high"] - entry, c["low"] - entry) if sign > 0 else (entry - c["low"], entry - c["high"]))
+            if vlo <= vstop:
+                vpts, vkind, vend = vstop, ("SL" if vstop <= -slv + 1e-9 else "BE"), c["t"]
+                break
+            if vhi >= t1v and t1_t is None:
+                t1_t = c["t"]
+            mx = max(mx, vhi)
+            if mx >= t1v:
+                vstop = max(vstop, 0.0)
+        else:
+            vpts, vkind, vend = last, "END", (path[-1]["t"] if path else None)
+        return {"t1": _round(entry + sign * t1v, 2), "t1Pts": _round(t1v, 1), "t1At": t1_t, "t1After": after(t1_t),
+                "sl": _round(entry - sign * slv, 2), "slPts": _round(slv, 1), "slAt": vend if vkind == "SL" else None,
+                "slAfter": after(vend) if vkind == "SL" else None,
+                "win": t1_t is not None, "pts": _round(vpts, 1), "kind": vkind, "exitAt": vend,
+                "alive": vkind == "END" and not complete}
+    variants = {("%g" % r): variant(r * sl, sl) for r in LADDER_RATIOS}
+    if p.get("eqx"):
+        variants["eq"] = variant(p["eqx"], p["eqx"])
     return {"bucket": bucket, "endIdx": end, "mfe": _round(mfe, 1), "res": res,
             "live": bool(path) and now is not None and (path[-1]["t"] + 60 > now if res == "1m" else False),
             "plans": {k: {"pts": _round(v["pts"], 1), "exitAt": v["endT"], "exitAfter": after(v["endT"]),
                           "reason": v["reason"], "kind": v["kind"], "alive": v["alive"]} for k, v in plans.items()},
-            "t1Pts": _round(t1_pts, 1),
+            "t1Pts": _round(t1_pts, 1), "variants": variants,
             "t1At": hit_t.get(1), "t2At": hit_t.get(2), "t3At": hit_t.get(3), "slAt": stop_t,
             "t1After": after(hit_t.get(1)), "t2After": after(hit_t.get(2)), "t3After": after(hit_t.get(3)),
             "slAfter": after(stop_t), "minutes": after(dec_t),
@@ -373,7 +407,7 @@ def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
             "t1Min": tr["t1After"], "entryAt": cs[i]["t"] + tf * 60,
             "t1At": tr["t1At"], "t2At": tr["t2At"], "t3At": tr["t3At"], "slAt": tr["slAt"],
             "t1After": tr["t1After"], "t2After": tr["t2After"], "t3After": tr["t3After"],
-            "slAfter": tr["slAfter"], "exitStyle": style, "plans": tr["plans"],
+            "slAfter": tr["slAfter"], "exitStyle": style, "plans": tr["plans"], "variants": tr["variants"],
             "planExitAt": pr["exitAt"], "planReason": pr["reason"], "planExitAfter": pr["exitAfter"],
             "planAlive": pr["alive"],
             "exit": tr["exit"], "mfe": tr["mfe"], "planPts": pr["pts"], "t1ExitPts": tr["t1Pts"],
@@ -432,6 +466,21 @@ def summarize(calls):
     out.update(_pts_stats(closed, lambda r: r["planPts"], lambda r: r["plans"][r["exitStyle"]]["kind"]))   # default rule
     out["styles"] = {k: _pts_stats(closed, lambda r, k=k: r["plans"][k]["pts"], lambda r, k=k: r["plans"][k]["kind"])
                      for k in EXIT_STYLES} if closed else {}
+    # the same calls with a bigger T1 (single-lot Runner): win rate = T1 touched before the stop
+    out["ladders"] = {}
+    if closed and all("variants" in r for r in closed):
+        for key in ["cur"] + ["%g" % r for r in LADDER_RATIOS] + (["eq"] if all("eq" in r["variants"] for r in closed) else []):
+            if key == "cur":
+                g = _pts_stats(closed, lambda r: r["plans"]["runner"]["pts"], lambda r: r["plans"]["runner"]["kind"])
+                wins = [r for r in closed if r["result"] in ("T1", "T2", "T3")]
+                g["winRate"] = round(len(wins) / len(closed) * 100, 1)
+                g["avgWinCallPts"] = round(sum(r["plans"]["runner"]["pts"] for r in wins) / len(wins), 1) if wins else None
+            else:
+                g = _pts_stats(closed, lambda r, key=key: r["variants"][key]["pts"], lambda r, key=key: r["variants"][key]["kind"])
+                wins = [r for r in closed if r["variants"][key]["win"]]
+                g["winRate"] = round(len(wins) / len(closed) * 100, 1)
+                g["avgWinCallPts"] = round(sum(r["variants"][key]["pts"] for r in wins) / len(wins), 1) if wins else None
+            out["ladders"][key] = g
     return out
 
 
@@ -505,7 +554,7 @@ def build(candles_by_tf, days=60, now=None, futures=None):
                 continue
             ent.update(family=p["family"],
                        familyLabel="VWAP reclaim in a trend" if p["family"] == "vwapx" else "Trend pullback resume",
-                       ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"]},
+                       ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"], "eqx": p.get("eqx")},
                        horizonMin=p["horizonMin"], exitStyle=p.get("exit", "runner"))
             raw1 = (candles_by_tf.get(1) or {}).get(seg) or []
             live1 = [c for c in raw1 if c["t"] <= now]                       # includes the forming minute

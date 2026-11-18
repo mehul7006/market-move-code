@@ -21,3 +21,5 @@ scorecard.csv
 wf.log
 nohup.out
 scorecard_out.json
+short_term_test_*d_calls.csv
+short_term_test_*d_report.md

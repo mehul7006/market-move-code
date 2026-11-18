@@ -503,3 +503,32 @@ still full stop-outs and about 6 in 10 end near zero; a few big trend moves pay 
 agreement, volatility, trend strength, VWAP distance, candle shape, time of day), wider and tighter stops, breakout / opening-range /
 previous-day-level signals, and pullback / confirmation entries: none reduced stop-outs without losing profit or held up on the last
 60 days, so the entry and stops were left unchanged. Brokerage and slippage are not included.
+
+## Choosing the T1 size (short term)
+Shipped ladders keep T1 at about 1/4-1/2 of the stop - that is what holds 70%+ wins. A bigger T1 pays more per winning call but wins
+less often (1,485 real calls, win rate = T1 before the stop): T1 = 1/2 stop 70.8%, 3/4 stop 64.0%, equal to the stop 57.5%. Entry filters
+and new signal types (opening-range, breakout, previous-day levels, all combined) did not restore 70% at T1 = stop (best filters +2-5
+points; new signals win 45-51% there). The Short term page's "Target size" card lets you view the same calls with T1 = 3/4 or equal to the
+stop (single-lot Runner). `python test_short_term.py 120` prints the full comparison for 1, 5, 15 and 30 minute candles.
+
+### Strategy-builder research for "T1 = SL" (what was tested, on real data)
+Goal tested: T1 equal to the stop, win rate 65-70%+, much higher average points per call. Result: **not reachable with the data available.**
+- Entries scored with 33 features (candlestick patterns, momentum over 1-24 bars, EMA/VWAP/RSI/MACD positions, volatility regime, day-range
+  position, prior-day levels, gap, 15m/30m trend, time of day, day of week) by a boosted model trained only on earlier months and tested on the
+  next unseen month (Jul-Nov): out-of-sample win rate at T1 = SL was 38-59% and the model almost never scored anything above 60%.
+- The same model used as a gate on the current VWAP-reclaim signals helped only inconsistently (e.g. Nifty 53% -> 57%).
+- New signal types (opening-range, breakout, previous-day high/low, new-day-high momentum, all combined): 45-53% at T1 = SL.
+- 25 single entry filters and the best filter pairs: +2-5 win-rate points at best, not stable on the last 60 days.
+- Volume / OI: index candles carry no volume; futures volume/OI exist only for ~4 weeks (47 Nifty signals) and did not help. Option greeks
+  / delta history is not available (expired contracts need the paid Upstox Plus plan), so they could not be backtested.
+- Best honest T1 = SL setup: size picked per index and candle from older data, checked on the unseen last 60 days: 61.1% wins pooled over
+  429 calls (see the "T1 = SL (tuned per index)" choice). Average per call there: Nifty about +4 to +5, Sensex +9 to +34, Bank Nifty +6 to +18,
+  Next 50 +27 to +107 points - well below Nifty 25-30 / Sensex 75-100, which no tested approach came close to.
+
+## Checking someone else's calls (and why "average per call" claims differ)
+`python audit_calls.py calls.csv` replays any list of calls (date, time, index, side, entry, sl, t1, t2, t3) on the real Upstox 1-minute
+candles and reports which level was touched first, when, the win rate, the points you could actually book (exit at T1 or the stop) and the
+"hindsight" points (the best price reached after the call - not tradeable). On this project's own calls, the hindsight average is Nifty
+~40-50 and Sensex ~180 points per call while the tradeable average is +2 to +19: the same calls produce a "30-40 per call, 70-80% wins" headline
+when counted by hindsight. Telegram groups also usually quote option-premium points (an ATM option moves roughly half as much as the index).
+`python test_short_term.py 120` prints the three ways of counting side by side for every index and candle size.
