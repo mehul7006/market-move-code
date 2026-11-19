@@ -481,7 +481,7 @@ def _replay_one(cs, p, since_ts=None, fine=None, now=None, until_ts=None, picks=
             "planExitAt": pr["exitAt"], "planReason": pr["reason"], "planExitAfter": pr["exitAfter"],
             "planAlive": pr["alive"],
             "exit": tr["exit"], "mfe": tr["mfe"], "planPts": pr["pts"], "t1ExitPts": tr["t1Pts"],
-            "live": tr["live"], "id": "%s-%s-%s%s" % (p["seg"], tf, cs[i]["t"], "-b" if p.get("isAlt") else ""), "family": (pk[2] if pk else p["family"]), "score": (pk[1] if pk else None), "grade": (pk[3] if pk else "A"), "prob": (pk[4] if pk and len(pk) > 4 else None), "why": (pk[5] if pk and len(pk) > 5 else None),
+            "live": tr["live"], "id": "%s-%s-%s%s" % (p["seg"], tf, cs[i]["t"], "-b" if p.get("isAlt") else ""), "family": (pk[2] if pk else p["family"]), "score": (pk[1] if pk else None), "grade": (pk[3] if pk else "A"), "prob": (pk[4] if pk and len(pk) > 4 else None), "why": (pk[5] if pk and len(pk) > 5 else None), "group": (pk[6] if pk and len(pk) > 6 else None),
             "preRun": _round((e - cs[i - lookback]["close"]) * s, 1),
             "patterns": sorted(set(mine)),
         })
@@ -681,7 +681,7 @@ def build(candles_by_tf, days=60, now=None, futures=None):
             # 60%+ confidence calls of the last 5 sessions: shown on their own page, never counted in the results
             if _PICKS60.get((seg, tf)):
                 since60 = cs[-1]["t"] - 7 * 86400
-                c60 = _replay_one(cs, p, since_ts=since60, fine=fine, now=now, picks=_PICKS60.get((seg, tf)), pending_sink=_PENDING60)
+                c60 = _replay_one(cs, dict(p, confirm=None), since_ts=since60, fine=fine, now=now, picks=_PICKS60.get((seg, tf)), pending_sink=_PENDING60)
                 for c in c60:
                     c["tier"] = "60"
                 conf60_calls.extend(c60)

@@ -84,7 +84,7 @@ def _short_rows(calls, session, now, ltps):
                          v["sl"], v["t1"], v["t2"], v["t3"], touched, status, wend, now,
                          (ltps.get(c["segment"]) or {}).get("last"), c.get("scoredOn"),
                          {"patterns": c.get("patterns") or [], "id": c["id"], "profile": "tgt", "family": c.get("family"), "grade": c.get("grade", "A"),
-                          "pts": v["pts"], "exitAt": v["exitAt"], "kind": v["kind"], "prob": c.get("prob"), "why": c.get("why")}))
+                          "pts": v["pts"], "exitAt": v["exitAt"], "kind": v["kind"], "prob": c.get("prob"), "why": c.get("why"), "group": c.get("group")}))
     return rows
 
 

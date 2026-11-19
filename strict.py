@@ -38,7 +38,9 @@ FAMILIES = ("vwapx", "pullback", "orb", "ema", "brk", "macd")
 MAX_PER_DAY = 5
 HORIZON_MIN = {1: 60, 5: 120}          # how long a call is followed
 HTF = {1: 5, 5: 15}                       # higher timeframe used for the trend-alignment feature
-FIRST_ENTRY, LAST_ENTRY = 9 * 60 + 25, 14 * 60 + 15
+FIRST_ENTRY, LAST_ENTRY = 9 * 60 + 25, 14 * 60 + 15        # SURE calls: entries 09:25-14:15 (locked)
+CONF_LAST_ENTRY = 15 * 60 + 15                               # confidence-tier calls may be generated until 15:15
+CONF_PATH = os.path.join(HERE, "conf_model.json")
 SESSION_CLOSE = 15 * 60 + 30
 # Per-index call rules (found by a walk-forward search, see train_strict.py): which candle sizes may issue a call and in which time window.
 # "window" = (earliest, latest) signal time as hours after 09:15 (None = no limit): 2.75 -> 12:00, 0.75 -> 10:00, 4.25 -> 13:30.
@@ -121,6 +123,19 @@ FEATURE_NAMES = ["hour", "atr_ratio", "trend_strength", "vwap_distance", "candle
                  "tf1", "tf5"]
 
 _model = {"mtime": None, "data": {}}
+_conf = {"mtime": None, "data": {}}
+
+
+def conf_model():
+    try:
+        m = os.path.getmtime(CONF_PATH)
+    except OSError:
+        return {}
+    if _conf["mtime"] != m:
+        with open(CONF_PATH, encoding="utf-8") as fh:
+            _conf["data"] = json.load(fh)
+        _conf["mtime"] = m
+    return _conf["data"]
 
 
 def model():
@@ -159,7 +174,7 @@ def features(cs):
             "macd_h": analysis.macd_series(closes)[2]}
 
 
-def raw_signals(cs, F, start=60):
+def raw_signals(cs, F, start=60, last_entry=None):
     """{family: [(i, side)]} for candles i >= start, using candles <= i only."""
     out = {f: [] for f in FAMILIES}
     n = len(cs)
@@ -169,7 +184,7 @@ def raw_signals(cs, F, start=60):
         c = cs[i]
         m = _mins(c["t"])
         a = F["atr"][i]
-        if not a or m < FIRST_ENTRY or m > LAST_ENTRY:
+        if not a or m < FIRST_ENTRY or m > (last_entry or LAST_ENTRY):
             continue
         e9, e21, e50, r = F["e9"][i], F["e21"][i], F["e50"][i], F["rsi"][i]
         if None in (e9, e21, e50, r):
@@ -229,7 +244,7 @@ def _htf_index(cs, tf, hcs, htf):
     return [bisect.bisect_right(ends, c["t"] + tf * 60) - 1 for c in cs]
 
 
-def candidates(cs, tf, hcs, start_t=None):
+def candidates(cs, tf, hcs, start_t=None, last_entry=None):
     """Every raw signal with its feature vector. cs = completed candles of this size, hcs = completed higher-timeframe candles."""
     if len(cs) < 120 or not hcs:
         return []
@@ -237,7 +252,7 @@ def candidates(cs, tf, hcs, start_t=None):
     start_i = 60
     if start_t is not None:
         start_i = max(60, bisect.bisect_left([c["t"] for c in cs], start_t))
-    sig = raw_signals(cs, F, start_i)
+    sig = raw_signals(cs, F, start_i, last_entry)
     HF = features(hcs)
     hmap = _htf_index(cs, tf, hcs, HTF[tf])
     atrs = F["atr"]
@@ -346,7 +361,7 @@ def prepare(candles_by_tf, now, days=120):
         mdl = mdls.get(seg)
         if not mdl:
             continue
-        allc = []
+        allc, pool = [], []
         for tf in TFS:
             cs = [c for c in (candles_by_tf.get(tf) or {}).get(seg) or [] if c.get("done", True) is not False and c["t"] + c.get("dur", tf * 60) <= now]
             raw5 = [c for c in (candles_by_tf.get(5) or {}).get(seg) or [] if c.get("done", True) is not False and c["t"] + c.get("dur", 300) <= now]
@@ -363,11 +378,14 @@ def prepare(candles_by_tf, now, days=120):
             if ck not in _CACHE:
                 for k in [k for k in _CACHE if k[0] == seg and k[1] == tf and k[2] != today0]:
                     _CACHE.pop(k, None)
-                old = candidates(cs, tf, hcs, start_t=first)
+                old = candidates(cs, tf, hcs, start_t=first, last_entry=CONF_LAST_ENTRY)
                 _CACHE[ck] = [x for x in old if x["t"] < today0]
-            fresh = [x for x in candidates(cs, tf, hcs, start_t=today0) if x["t"] >= today0]
+            fresh = [x for x in candidates(cs, tf, hcs, start_t=today0, last_entry=CONF_LAST_ENTRY) if x["t"] >= today0]
             for x in _CACHE[ck] + fresh:
-                if x["t"] >= first and allowed(seg, x):
+                if x["t"] < first:
+                    continue
+                pool.append(x)
+                if allowed(seg, x) and _mins(x["t"]) <= LAST_ENTRY:          # SURE calls: unchanged rules, entries until 14:15
                     x["score"] = score(mdl, x["feat"])
                     allc.append(x)
         sure_ids = set()
@@ -378,15 +396,18 @@ def prepare(candles_by_tf, now, days=120):
             chosen.append((seg, x))
             sure_ids.add((x["tf"], x["t"]))
         # 60%+ confidence: every other signal whose historical win rate at its score is >= CONF60_MIN (own one-at-a-time / per-day rule)
-        rest = []
-        c60 = mdl.get("conf60")
-        if mdl.get("thr60") is not None and c60:
-            for x in allc:
-                if (x["tf"], x["t"]) in sure_ids or x["score"] < mdl["thr60"]:
+        cm = conf_model().get(seg)
+        if cm:
+            rest = []
+            for x in pool:
+                if (x["tf"], x["t"]) in sure_ids or x["tf"] not in cm["tfs"] or _mins(x["t"]) > cm.get("lastEntry", CONF_LAST_ENTRY):
                     continue
-                rest.append(dict(x, prob=c60["winRate"] / 100.0, why=_why_not_sure(mdl, x)))
-        for x in select(rest, dict(mdl, thr=-1e9, trend=None)):
-            conf60.append((seg, x))
+                cs_ = score(cm, x["feat"])
+                if cs_ >= cm["thr"]:
+                    rest.append(dict(x, score=cs_, prob=(cm.get("outOfSample") or {}).get("winRate", 0) / 100.0,
+                                     why="confidence tier" + (" (after 14:15)" if _mins(x["t"]) > LAST_ENTRY else "")))
+            for x in select(rest, dict(cm, thr=-1e9, trend=None), max_per_day=cm.get("maxPerDay", 8)):
+                conf60.append((seg, x))
     kept = cross_dedupe(chosen)
     kept_ids = {(s, x["tf"], x["t"]) for s, x in kept}
     for seg, x in chosen:
@@ -396,9 +417,19 @@ def prepare(candles_by_tf, now, days=120):
             conf60.append((seg, dict(x, prob=((m_.get("outOfSample") or {}).get("winRate") or 0) / 100.0, why="same move already called on %s" % (mate or "another index"))))
     for seg, x in kept:
         out.setdefault((seg, x["tf"]), {})[x["t"]] = (x["side"], round(x["score"], 3), x["fam"], x.get("grade", "A"))
+    groups = []                                              # same side within CROSS_DEDUPE_MIN on several indexes = one counted call
+    for seg, x in sorted(conf60, key=lambda sx: sx[1]["done"]):
+        g = next((g for g in groups if g["side"] == x["side"] and abs(g["done"] - x["done"]) <= max(CROSS_DEDUPE_MIN, 5) * 60), None)
+        if g is None:
+            groups.append({"side": x["side"], "done": x["done"], "lead": seg})
+            x["group"] = len(groups)
+        else:
+            x["group"] = groups.index(g) + 1
+            if "same move" not in (x.get("why") or ""):
+                x["why"] = (x.get("why") or "") + "; same move as %s (counted once)" % g["lead"]
     LAST_CONF60.clear()
     for seg, x in conf60:
-        LAST_CONF60.setdefault((seg, x["tf"]), {})[x["t"]] = (x["side"], round(x["score"], 3), x["fam"], "C", round(x.get("prob") or 0, 3), x.get("why", ""))
+        LAST_CONF60.setdefault((seg, x["tf"]), {})[x["t"]] = (x["side"], round(x["score"], 3), x["fam"], "C", round(x.get("prob") or 0, 3), x.get("why", ""), x.get("group"))
     return out
 
 

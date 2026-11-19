@@ -26,3 +26,4 @@ short_term_test_*d_report.md
 server.out
 strict_tf_test_*d_calls.csv
 strict_tf_test_*d_report.md
+conf_tier_test_*d_calls.csv

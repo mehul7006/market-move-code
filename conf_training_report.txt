@@ -1,0 +1,19 @@
+CONFIDENCE-TIER TRAINING - 2026-11-19 23:31 IST (sure-call model untouched)
+
+== NIFTY: T1 22.5 / stop 25; model target pnl, candles (1, 5), top 15% of scores, 09:25-15:15, not sure calls
+   test block 2026-08-21: 52 calls, win 51.9%, net +1.5
+   test block 2026-09-20: 60 calls, win 55.0%, net +10.0
+   test block 2026-10-20: 59 calls, win 62.7%, net +7.8
+   OUT-OF-SAMPLE: 171 calls, win 56.7%, net +6.6 per call
+
+== BANKNIFTY: T1 63 / stop 70; model target win, candles (1, 5), top 5% of scores, 09:25-15:15, not sure calls
+   test block 2026-08-21: 23 calls, win 47.8%, net +4.4
+   test block 2026-09-20: 31 calls, win 71.0%, net +48.4
+   test block 2026-10-20: 30 calls, win 63.3%, net +33.2
+   OUT-OF-SAMPLE: 84 calls, win 61.9%, net +30.9 per call
+
+== SENSEX: T1 81 / stop 90; model target win, candles (1, 5), top 40% of scores, 09:25-15:15, not sure calls
+   test block 2026-08-21: 80 calls, win 47.5%, net +6.4
+   test block 2026-09-20: 88 calls, win 51.1%, net +24.4
+   test block 2026-10-20: 84 calls, win 69.0%, net +32.7
+   OUT-OF-SAMPLE: 252 calls, win 56.0%, net +21.5 per call
