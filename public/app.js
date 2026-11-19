@@ -1096,7 +1096,7 @@ function renderToday(t) {
 /* ------------------------------------------------------------------ active calls: every generated + running call, long & short */
 
 let activeData = null;
-let activeTerm = "all";
+let activeTerm = "short";
 let activeStatus = null;          // null = automatic: "running" when something runs, otherwise "all"
 let activeTimer = null;
 let activeBusy = false;
@@ -1145,7 +1145,7 @@ function renderActive() {
   const d = activeData;
   if (!d) return;
   const c = d.counts;
-  const status = activeStatus || (c.running ? "running" : "all");
+  const status = activeStatus || "all";
   const clk = (t) => (t ? todayClock(t) : "—");
   const pts = (x) => (x == null ? "—" : x);
   let rows = d.calls.filter((r) => (activeTerm === "all" || r.term === activeTerm)
@@ -1172,20 +1172,6 @@ function renderActive() {
     if (r.status === "TIMEOUT") return `<span class="pf-out pf-timeout">TIMEOUT</span>`;
     return `<span class="pf-out pf-t1">${esc(r.status)} HIT</span>`;
   };
-  const tr = rows.map((r) => `<tr${r.running ? ' style="background:rgba(59,130,246,.10)"' : ""}>
-      <td><span class="fc-badge">${r.term === "short" ? "SHORT" : "LONG"}</span><div class="fcs">${esc(r.candle)}</div></td>
-      <td class="name">${esc(r.name)}</td>
-      <td>${r.side === "BUY" ? '<span class="pos">▲ BUY</span>' : '<span class="neg">▼ SELL</span>'}</td>
-      <td class="num">${clk(r.generatedAt)}<div class="fcs">${r.running ? (r.openMinutes ?? 0) + " min ago" : "generated"}</div></td>
-      <td class="num">${fmt(r.entry)}<div class="fcs">${r.running && r.ltp != null ? "now " + fmt(r.ltp) : ""}</div></td>
-      ${level(r, "sl", r.sl, r.slPts, "sl")}
-      ${level(r, "t1", r.t1, r.t1Pts, "t")}
-      ${level(r, "t2", r.t2, r.t2Pts, "t")}
-      ${level(r, "t3", r.t3, r.t3Pts, "t")}
-      <td>${chip(r)}</td>
-      <td class="fcs">${r.running ? "window ends " + clk(r.windowEnd) : "closed"}${r.patterns && r.patterns.length ? "<br>" + esc(r.patterns.join(", ")) : ""}</td>
-    </tr>`).join("");
-
   const live = d.marketOpen
     ? `<span class="fc-badge pos">● LIVE · re-checked every 5 s · ${clk(d.serverTime)} IST</span>`
     : `<span class="fc-badge">market closed · last data ${clk(d.serverTime)} IST</span>`;
@@ -1193,43 +1179,138 @@ function renderActive() {
   const statBtn = (k, label) => `<button class="btn ${status === k ? "btn-accent" : "ghost"} ac-stat" data-v="${k}">${label}</button>`;
   const ltpStrip = Object.entries(d.ltp || {}).map(([seg, v]) => `<span class="fc-badge">${esc(seg)} ${v.last == null ? "—" : fmt(v.last)}</span>`).join(" ");
 
+  const items = rows.map(normActive);
   $("activeBody").innerHTML = `
     <div class="proof-card">
       <div class="pf-h">${c.running ? `${c.running} running now` : "Nothing running right now"} ${live}
         <span class="fc-badge">session ${esc(d.sessionDate || "—")}${d.isToday ? "" : " (last completed)"}</span></div>
-      <div class="pf-stats">
-        <div><span>Running now</span><b class="${c.running ? "pos" : ""}">${c.running}</b><div class="fcs">short ${c.runningShort} · long ${c.runningLong}</div></div>
-        <div><span>Generated this session</span><b>${c.total}</b><div class="fcs">short ${c.shortTotal} · long ${c.longTotal}</div></div>
-        <div><span>Reached a target</span><b class="pos">${c.hit}</b></div>
-        <div><span>Stopped out</span><b class="neg">${c.stopped}</b></div>
-        <div><span>Timed out</span><b>${c.timeout}</b></div>
-      </div>
-      <div class="pf-note">${ltpStrip}</div>
-      ${!c.running && !d.marketOpen ? `<div class="pf-note">The market is closed, so no call is running. Showing the calls generated in the last session so you can
-        see every level and the time it was touched.</div>` : ""}
-    </div>
-    <div class="proof-card">
-      <div class="pf-h">${status === "running" ? "Running calls" : status === "finished" ? "Finished calls" : "All generated calls"} — ${rows.length} shown
-        <span class="spacer"></span>
-        ${termBtn("all", "Long + Short")} ${termBtn("short", "Short term")} ${termBtn("long", "Long term")}
-        &nbsp;|&nbsp; ${statBtn("running", "Running")} ${statBtn("finished", "Finished")} ${statBtn("all", "All")}
-      </div>
-      ${rows.length ? `<div class="table-wrap" style="max-height:72vh;overflow:auto"><table class="research pf-table">
-        <thead><tr><th>Term</th><th>Index</th><th>Side</th><th>Generated</th><th>Entry</th><th>SL</th><th>T1</th><th>T2</th><th>T3</th>
-          <th>Status</th><th>Window</th></tr></thead><tbody>${tr}</tbody></table></div>`
-        : `<div class="pf-note">No ${status === "running" ? "running " : ""}call matches this filter${status === "running" ? " — a new call appears here within seconds of its candle closing" : ""}.</div>`}
-      <div class="pf-note"><b>How to read it:</b> ${esc(d.notes.running)} ${esc(d.notes.live)} ${esc(d.notes.long)}</div>
+      <div class="pf-note"><b>${c.total}</b> generated this session (short ${c.shortTotal} · long ${c.longTotal}) ·
+        <b class="pos">${c.hit}</b> reached a target · <b class="neg">${c.stopped}</b> stopped out · ${c.timeout} timed out · ${ltpStrip}</div>
+      <div style="margin:8px 0">${termBtn("short", "Short term (T1 ≥ 90% of stop)")} ${termBtn("long", "Long term (wide stop)")} ${termBtn("all", "Both")}
+        &nbsp;|&nbsp; ${statBtn("running", "Running")} ${statBtn("finished", "Finished")} ${statBtn("all", "All")}</div>
+      ${callListHtml(items, "act", `No ${status === "running" ? "running " : ""}call matches this filter${status === "running" ? " — a new call appears here within seconds of its candle closing" : ""}.`)}
     </div>`;
+  bindCallList($("activeBody"), (seg) => { closeActive(); openShortIndex(seg); });
   document.querySelectorAll(".ac-term").forEach((b) => { b.onclick = () => { activeTerm = b.dataset.v; renderActive(); }; });
   document.querySelectorAll(".ac-stat").forEach((b) => { b.onclick = () => { activeStatus = b.dataset.v; renderActive(); }; });
 }
 
 
+
+/* ------------------------------------------------------------------ compact call list: one line per call, click for every detail */
+const CL = { open: {} };          // which rows are expanded (kept across the 5 s refresh)
+
+function clClock(t) { return t ? todayClock(t) : "—"; }
+function clResultChip(n) {
+  if (n.status === "WAITING") return `<span class="pf-out pf-timeout" title="Entered only if price trades the trigger before the time shown">⏳ ${n.side === "BUY" ? "BUY ABOVE" : "SELL BELOW"} ${fmt(n.trigger)} until ${clClock(n.until)}</span>`;
+  if (n.status === "RUNNING") return `<span class="pf-out pf-open">● RUNNING${n.best ? " · T" + n.best : ""}</span>`;
+  if (n.status === "SL") return `<span class="pf-out pf-sl">SL HIT</span>`;
+  if (n.status === "TIMEOUT") return `<span class="pf-out pf-timeout">TIMEOUT</span>`;
+  return `<span class="pf-out pf-t1">${esc(n.status)} HIT</span>`;
+}
+function clExit(n) {
+  if (n.status === "WAITING") return `<span class="fcs">not entered yet</span>`;
+  if (n.status === "RUNNING") return `<span class="fcs">open${n.ltp != null ? " · now " + fmt(n.ltp) : ""}</span>`;
+  const dir = n.side === "BUY" ? 1 : -1;
+  let price = null, note = "";
+  if (n.pts != null) { price = n.entry + dir * n.pts; note = (n.pts >= 0 ? "+" : "") + n.pts + " pts"; }
+  else if (n.status === "SL") { price = n.sl; note = "stop"; }
+  else if (/^T[123]$/.test(n.status)) { price = n["t" + n.status[1]].price; note = "at " + n.status; }
+  if (price == null) return `<span class="fcs">—</span>`;
+  return `${fmt(price)}<div class="fcs ${n.pts != null && n.pts < 0 ? "neg" : "pos"}">${note}</div>`;
+}
+function clSl(n) {
+  const at = n.slAt;
+  return `<td class="num neg">${fmt(n.sl)}${at ? `<div class="fcs neg">✗ hit ${clClock(at)}</div>` : ""}</td>`;
+}
+function clTarget(n, k) {
+  const l = n[k];
+  return `<td class="num ${n[k + "At"] ? "pos" : ""}">${fmt(l.price)}${n[k + "At"] ? `<div class="fcs pos">✓ ${clClock(n[k + "At"])}</div>` : ""}</td>`;
+}
+function clNeed(n, price, kind) {
+  if (n.ltp == null) return "—";
+  const dir = n.side === "BUY" ? 1 : -1;
+  const dist = kind === "sl" ? (n.ltp - price) * dir : (price - n.ltp) * dir;
+  return dist >= 0 ? dist.toFixed(1) + " pts" : "passed";
+}
+function clLevel(n, key, label, kind) {
+  const l = key === "sl" ? { price: n.sl, pts: n.slPts } : n[key], at = n[key + "At"];
+  let sub;
+  if (at) sub = `<span class="${kind === "sl" ? "neg" : "pos"}">${kind === "sl" ? "✗ stop touched" : "✓ touched"} at ${clClock(at)}${n[key + "After"] != null ? " · " + n[key + "After"] + " min after entry" : ""}</span>`;
+  else if (n.status === "RUNNING") sub = `<span class="fcs">${kind === "sl" ? "room left " : "still needs "}${clNeed(n, l.price, kind)}</span>`;
+  else sub = `<span class="fcs">${kind === "sl" ? "not touched" : "not reached"}</span>`;
+  return `<div class="cl-lvl"><span class="cl-k">${label}</span><b class="${kind === "sl" ? "neg" : kind === "t1" ? "pos" : ""}">${fmt(l.price)}</b>
+    <span class="fcs">${l.pts} pts</span><div>${sub}</div></div>`;
+}
+function clDetail(n) {
+  const tail = n.exitAt ? `${clClock(n.exitAt)} · ${esc(n.reason || "—")}` : (n.status === "RUNNING" ? "still open" : esc(n.reason || "—"));
+  return `<div class="cl-detail">
+    <div class="cl-grid">${clLevel(n, "sl", "Stop loss", "sl")}${clLevel(n, "t1", "T1", "t1")}${clLevel(n, "t2", "T2", "t")}${clLevel(n, "t3", "T3", "t")}</div>
+    <div class="cl-meta">
+      <span><b>Entry</b> ${fmt(n.entry)} at ${clClock(n.t)} IST (${esc(n.date)})</span>
+      <span><b>Exit</b> ${tail}${n.pts != null ? ` · <b class="${n.pts >= 0 ? "pos" : "neg"}">${n.pts >= 0 ? "+" : ""}${n.pts} pts</b>` : ""}</span>
+      ${n.windowEnd ? `<span><b>Window</b> until ${clClock(n.windowEnd)}</span>` : ""}
+      <span><b>Tier</b> ${n.grade === "B" ? "B — lower confidence (looser filter)" : "A — strict filter"}</span>
+      <span><b>Signal</b> ${esc(n.family || (n.term === "long" ? "Long-term precision profile" : "short term"))}${n.patterns && n.patterns.length ? " · patterns: " + esc(n.patterns.join(", ")) : ""}</span>
+      <span><a href="#" class="cl-idx" data-seg="${esc(n.seg)}">Open the ${esc(n.name)} page — research &amp; prediction logic →</a></span>
+    </div></div>`;
+}
+function callListHtml(items, id, emptyMsg) {
+  if (!items.length) return `<div class="pf-note">${emptyMsg || "No calls to show."}</div>`;
+  const rows = items.map((n, i) => {
+    const key = id + ":" + n.id, open = !!CL.open[key];
+    return `<tr class="cl-row ${open ? "open" : ""} ${n.status === "RUNNING" ? "cl-running" : ""}" data-key="${esc(key)}">
+      <td class="num">${esc(n.date.slice(5))} <b>${clClock(n.t)}</b></td>
+      <td class="name"><a href="#" class="cl-idx" data-seg="${esc(n.seg)}">${esc(n.name)}</a><div class="fcs">${esc(n.candle)}${n.term === "long" ? " · long" : ""}</div>${n.grade === "B" ? `<div class="fcs"><span class="fc-badge" title="Looser filter: a lower-confidence call (about 59% win in testing)">B tier</span></div>` : ""}${n.slPts * 0.9 > n.t1.pts + 1e-9 ? `<div class="fcs neg">⚠ stop ${n.slPts} &gt; T1 ${n.t1.pts}</div>` : ""}</td>
+      <td>${n.side === "BUY" ? '<span class="pos">▲ BUY</span>' : '<span class="neg">▼ SELL</span>'}</td>
+      <td class="num">${fmt(n.entry)}</td>
+      ${clSl(n)}
+      ${clTarget(n, "t1")}${clTarget(n, "t2")}${clTarget(n, "t3")}
+      <td>${clResultChip(n)}</td>
+      <td class="cl-chev">${open ? "▾" : "▸"}</td></tr>
+      <tr class="cl-det ${open ? "" : "hidden"}" data-for="${esc(key)}"><td colspan="10">${clDetail(n)}</td></tr>`;
+  }).join("");
+  return `<div class="table-wrap" style="max-height:72vh;overflow:auto"><table class="research pf-table call-list">
+    <thead><tr><th>Time</th><th>Index</th><th>Side</th><th>Entry</th><th>Stop loss</th><th>T1</th><th>T2</th><th>T3</th><th>Result</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="pf-note">✓ time = the target was touched at that time · ✗ time = the stop loss was hit at that time. Click a call for every detail and its exit.</div>`;
+}
+function bindCallList(root, onIndex) {
+  root.querySelectorAll(".cl-row").forEach((tr) => {
+    tr.onclick = (e) => {
+      if (e.target.closest("a")) return;
+      const key = tr.dataset.key, det = root.querySelector(`.cl-det[data-for="${CSS.escape(key)}"]`);
+      CL.open[key] = !CL.open[key];
+      tr.classList.toggle("open", CL.open[key]);
+      tr.querySelector(".cl-chev").textContent = CL.open[key] ? "▾" : "▸";
+      if (det) det.classList.toggle("hidden", !CL.open[key]);
+    };
+  });
+  root.querySelectorAll(".cl-idx").forEach((a) => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); onIndex(a.dataset.seg); }; });
+}
+function normActive(r) {
+  const lv = (p, a, af) => ({ price: p });
+  return { id: r.id || (r.term + r.segment + r.generatedAt), date: new Date((r.generatedAt + 19800) * 1000).toISOString().slice(0, 10), t: r.generatedAt,
+    seg: r.segment, name: String(r.name).replace(/ \d+m short-term$/, ""), candle: r.candle, term: r.term, side: r.side, entry: r.entry, status: r.status, running: r.running, best: r.best, ltp: r.ltp,
+    sl: r.sl, slAt: r.touched.sl, slAfter: r.touched.sl ? Math.round((r.touched.sl - r.generatedAt) / 60) : null, slPts: r.slPts,
+    ...Object.fromEntries(["t1", "t2", "t3"].map((k) => [k, { price: r[k], pts: r[k + "Pts"] }])),
+    t1At: r.touched.t1, t2At: r.touched.t2, t3At: r.touched.t3,
+    t1After: r.touched.t1 ? Math.round((r.touched.t1 - r.generatedAt) / 60) : null,
+    t2After: r.touched.t2 ? Math.round((r.touched.t2 - r.generatedAt) / 60) : null,
+    t3After: r.touched.t3 ? Math.round((r.touched.t3 - r.generatedAt) / 60) : null,
+    grade: r.grade || "A", trigger: r.trigger, until: r.until, pts: r.pts ?? null, exitAt: r.exitAt ?? null, reason: r.kind ? ({ SL: "Stop loss touched", BE: "Stop moved to entry after T1 - touched", END: "Window ended - closed at last price" })[r.kind] : null,
+    windowEnd: r.windowEnd, patterns: r.patterns, family: r.family ? (r.family === "vwapx" ? "VWAP reclaim in a trend" : "Trend pullback resume") : null };
+}
+
 /* ------------------------------------------------------------------ generate calls: short term (1m / 5m / 15m / 30m) */
 
 let shortFilter = "all";
+let shortView = "calls";           // calls | research | index
+let shortScope = "today";          // today | 5d | all
+let shortResult = "all";
+let shortIndex = "NIFTY";
 let shortLadder = "tgt";          // T1 size: cur = shipped (T1 about 1/4-1/2 of the stop), "0.75" = 3/4 of the stop, "1" = equal to the stop
-const LADDER_LABELS = { tgt: "Target: T1 = SL (Nifty 25 · Sensex & Bank Nifty 75)", cur: "High win rate (T1 ≈ ¼–½ of stop)", "0.75": "T1 = ¾ of stop", "1": "T1 = stop", eq: "T1 = SL (tuned per index)" };
+const LADDER_LABELS = { tgt: "Strict levels (T1 / stop): Nifty 22.5/25 · Bank Nifty 63/70 · Sensex 81/90", cur: "High win rate (T1 ≈ ¼–½ of stop)", "0.75": "T1 = ¾ of stop", "1": "T1 = stop", eq: "T1 = SL (tuned per index)" };
 let shortStyle = "runner";        // how the single lot is managed once a call is open (no extra lots, no partial booking)
 const EXIT_LABELS = { runner: "Runner (recommended)", protect: "Protect early", target: "Fixed T3 target" };
 const EXIT_HELP = {
@@ -1322,6 +1403,87 @@ function shortLiveCard(s) {
   </div>`;
 }
 
+
+function normShort(r, d) {
+  const vr = shortLadder !== "cur" && r.variants ? r.variants[shortLadder] : null;
+  const p = vr ? null : ((r.plans && r.plans[shortStyle]) || { pts: r.planPts, exitAt: r.planExitAt, reason: r.planReason });
+  const reasons = { SL: "Stop loss touched", BE: "Stop moved to entry after T1 - touched", END: "Window ended - closed at last price" };
+  const st = vr ? (vr.alive ? "RUNNING" : vr.kind === "SL" && !vr.win ? "SL" : vr.best ? "T" + vr.best : vr.win ? "T1" : "TIMEOUT")
+    : (r.result === "OPEN" || r.planAlive) ? "RUNNING" : r.result;
+  const pick = (k) => vr ? { price: vr[k], pts: vr[k + "Pts"] } : { price: r[k], pts: r[k + "Pts_"] };
+  const at = (k) => vr ? vr[k + "At"] : r[k + "At"];
+  const after = (k) => vr ? vr[k + "After"] : r[k + "After"];
+  const slAt = vr ? (vr.kind === "SL" ? vr.slAt : null) : (r.result === "SL" ? r.slAt : null);
+  const ltp = ((d.ltp || {})[r.segment] || {}).last;
+  return { id: r.id, date: r.date, t: r.entryAt, seg: r.segment, name: ({ NIFTY: "Nifty 50", BANKNIFTY: "Bank Nifty", SENSEX: "Sensex", NEXT50: "Next 50" })[r.segment] || r.segment,
+    candle: r.tf + "m", term: "short", side: r.side, entry: r.entry, status: st, running: st === "RUNNING", best: vr ? vr.best : null, ltp,
+    sl: vr ? vr.sl : r.sl, slPts: vr ? vr.slPts : r.slPts, slAt, slAfter: vr ? (vr.kind === "SL" ? vr.slAfter : null) : r.slAfter,
+    t1: pick("t1"), t2: pick("t2"), t3: pick("t3"), t1At: at("t1"), t2At: at("t2"), t3At: at("t3"), t1After: after("t1"), t2After: after("t2"), t3After: after("t3"),
+    pts: vr ? vr.pts : p.pts, exitAt: vr ? vr.exitAt : p.exitAt, reason: vr ? reasons[vr.kind] : p.reason,
+    grade: r.grade || "A", windowEnd: null, patterns: r.patterns || [],
+    family: r.family ? (r.family === "vwapx" ? "VWAP reclaim in a trend" : "Trend pullback resume") : null };
+}
+
+const INDEX_NAMES = { NIFTY: "Nifty 50", BANKNIFTY: "Bank Nifty", SENSEX: "Sensex" };
+function openShortIndex(seg) {
+  shortIndex = seg; shortView = "index";
+  openShort();
+}
+
+function renderShortIndex(d, seg, norm) {
+  const chips = Object.entries(INDEX_NAMES).map(([k, v]) => `<button class="btn sh-idx ${seg === k ? "btn-accent" : "ghost"}" data-i="${k}">${v}</button>`).join(" ");
+  const pc = (x) => (x == null ? "—" : x + "%");
+  const pt = (x) => (x == null ? "—" : (x >= 0 ? "+" : "") + x);
+  const perTf = ["1", "5"].map((tf) => {
+    const s = (d.timeframes[tf].segments || []).find((x) => x.id === seg);
+    return s ? { tf, s } : null;
+  }).filter(Boolean);
+  const live = perTf.map(({ s }) => shortLiveCard(s)).join("");
+  const rows = perTf.filter(({ s }) => s.validated && s.stats).map(({ tf, s }) => {
+    const L = s.stats.ladders || {}, tg = L.tgt || {}, cu = L.cur || {};
+    return `<tr><td class="name">${tf} min<div class="fcs">${esc(s.familyLabel || "")}</div></td>
+      <td class="num">T1 +${s.ladder.tgtx} · T2 +${2 * s.ladder.tgtx} · T3 +${3 * s.ladder.tgtx}<div class="fcs neg">SL −${s.ladder.tgtsl}</div></td>
+      <td class="num">${s.stats.calls}</td>
+      <td class="num"><b>${pc(tg.winRate)}</b><div class="fcs neg">${pc(tg.stopRate)} stopped</div></td>
+      <td class="num ${(tg.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}"><b>${pt(tg.avgPlanPts)}</b><div class="fcs">win call ${tg.avgWinCallPts ?? "—"}</div></td>
+      <td class="num">T1 +${s.ladder.t1} · SL −${s.ladder.sl}<div class="fcs"><b>${pc(cu.winRate)}</b> win · net ${pt(cu.avgPlanPts)}</div></td>
+      <td class="num">${pc(s.older && s.older.ladders && s.older.ladders.tgt ? s.older.ladders.tgt.winRate : null)}<div class="fcs">${s.older ? s.older.calls : 0} older calls</div></td></tr>`;
+  }).join("");
+  const mine = [];
+  ["1", "5"].forEach((tf) => (d.timeframes[tf].calls || []).forEach((r) => { if (r.segment === seg) mine.push(r); }));
+  mine.sort((a, b) => b.entryAt - a.entryAt);
+  const lastDay = mine.length ? mine[0].date : "";
+  const today = mine.filter((r) => r.date === lastDay).map(norm);
+  const LOGIC = {
+    NIFTY: ["Levels: T1 +22.5, T2 +45, T3 +67.5; stop −25 (T1 is 90% of the stop). Calls on 5-minute candles only, from 09:40 (the first signals of the day lost most often), top 10% of scores by a model trained on \"will T1 be reached before the stop\". About 0.8 calls a session; out-of-sample 73.8% wins, +20.9 points per call; 120-day replay 64.2% wins, +14.5 points per call.",
+      "Fewer Nifty calls than before, but each one is more reliable and earns more."],
+    BANKNIFTY: ["Levels: T1 +63, T2 +126, T3 +189; stop −70. Calls on 1-minute candles only, the strictest filter (top 5% of scores), entered at the signal close (waiting for confirmation made Bank Nifty worse). About 1.2 calls a session; out-of-sample 70.3% wins, net about +36 points per call.",
+      "The 1-minute candles carried all of Bank Nifty's edge."],
+    SENSEX: ["Levels (from the entry): T1 +81, T2 +162, T3 +243; stop −90. Calls on 5-minute candles, top 40% of scores, skipped when RSI is already stretched in the call's direction (late entries lost most often), and entered only after price moves 4.5 points further in the call's direction within 10 minutes. Out-of-sample about 1.3 calls a session, about 75% wins; 120-day replay 62% wins, +63 points per call.",
+      "Both added rules improved the win rate and the net in every 30-day block."],
+  };
+  const METHOD = [
+    "<b>Six signal types are scanned on 1 and 5-minute candles:</b> VWAP reclaim in a trend, trend pullback, opening-range breakout, EMA 9/21 cross, 20-candle breakout and MACD zero-cross. Each index uses the candle sizes that tested best for it (see above).",
+    "<b>Every signal gets a score</b> from a model fitted for this index (20 inputs: time of day, volatility, trend strength, distance from VWAP, RSI, position in the day's range, move so far today, higher-timeframe alignment, how many other signal types agree, and more). Only the top 5–40% of signals become calls.",
+    "<b>Confirmation entry (Sensex):</b> after the signal candle closes, the call is entered only if price moves 4.5 points further in its direction within 10 minutes — the entry price is that trigger; if it does not trade, the call is cancelled. It filters out signals that fail at once.",
+    "<b>Strict rules:</b> one open call per index at a time — a 1 and a 5-minute signal at the same moment count as ONE — at most 5 calls per index per day, decided only on completed candles.",
+    "<b>Levels:</b> T1 is 90% of the stop (never smaller than that), T2 = 2× and T3 = 3× T1. After T1 the stop moves to entry and the call runs to the end of its window (1–2 hours). Every call is scored on the real 1-minute path, the stop first if one minute touches both.",
+    "<b>Tested honestly:</b> trained only on earlier data and tested on the next 30 days, three times — 65–70% wins out of sample. The rules were still picked as the best of many combinations, so live results are likely somewhat lower.",
+    "<b>The trade-off:</b> a win rate above 65% needs a strict filter, so there are about 5 calls a session across the three indexes. Numbers are index points; an at-the-money option moves about half as much.",
+  ];
+  return `<div class="proof-card"><div class="pf-h">Index page</div><div>${chips}</div></div>
+    <div class="proof-card"><div class="pf-h">${INDEX_NAMES[seg]} — research &amp; results by candle size</div>
+      ${rows ? `<div class="table-wrap"><table class="research pf-table"><thead><tr><th>Candle · signals</th><th>Target profile</th><th>Calls (${d.days}d)</th><th>Win · stopped</th>
+        <th>Net per call · winning call</th><th>High-win-rate profile</th><th>Older months</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : `<div class="pf-note">No validated strategy for this index on the loaded candle sizes.</div>`}
+      <ul class="pf-method">${(LOGIC[seg] || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>
+    <div class="proof-card"><div class="pf-h">How the prediction is made (this index)</div><ul class="pf-method">${METHOD.map((x) => `<li>${x}</li>`).join("")}</ul></div>
+    <div class="proof-card"><div class="pf-h">What each candle size says right now</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:10px">${live}</div></div>
+    <div class="proof-card"><div class="pf-h">${INDEX_NAMES[seg]} calls — latest session ${esc(lastDay)} (${today.length})</div>
+      ${callListHtml(today, "ix", "No calls generated in the latest session.")}</div>`;
+}
+
 function renderShort() {
   const d = shortData;
   if (!d) return;
@@ -1337,7 +1499,7 @@ function renderShort() {
   const styleName = EXIT_LABELS[shortStyle];
 
   const isAll = shortTf === "all";
-  const tfChips = ["all", "1", "5", "15", "30"].map((k) => {
+  const tfChips = ["all", "1", "5"].map((k) => {
     const b = d.timeframes[k];
     return `<button class="btn sh-tf ${shortTf === k ? "btn-accent" : "ghost"}" data-tf="${k}">${k === "all" ? "All candles" : k + " min"}
       <span class="fcs">${b.totals.calls ? b.totals.calls + " calls · " + pc(b.totals.winRate) + " win" : "no validated calls"}</span></button>`;
@@ -1348,7 +1510,7 @@ function renderShort() {
       <td class="name">${esc(s.name)}${s.smallSample ? ' <span class="fc-badge">small sample</span>' : ""}
         <div class="fcs">${esc(s.familyLabel)}</div>
         <div class="fcs">rule: ${esc(EXIT_LABELS[shortStyle] || "")}</div></td>
-      <td class="num">${shortLadder === "tgt" ? `T1 +${s.ladder.tgtx} · T2 +${2 * s.ladder.tgtx} · T3 +${3 * s.ladder.tgtx}` : shortLadder === "eq" ? `T1 +${s.ladder.eqx} · SL −${s.ladder.eqx}` : `T1 +${lad ? Math.round(Number(shortLadder) * s.ladder.sl) : s.ladder.t1} · T2 +${s.ladder.t2} · T3 +${s.ladder.t3}`}<div class="fcs neg">${shortLadder === "tgt" ? `SL −${s.ladder.tgtx} pts · ` : shortLadder === "eq" ? "" : `SL −${s.ladder.sl} pts · `}${s.horizonMin} min</div></td>
+      <td class="num">${shortLadder === "tgt" ? `T1 +${s.ladder.tgtx} · T2 +${2 * s.ladder.tgtx} · T3 +${3 * s.ladder.tgtx}` : shortLadder === "eq" ? `T1 +${s.ladder.eqx} · SL −${s.ladder.eqx}` : `T1 +${lad ? Math.round(Number(shortLadder) * s.ladder.sl) : s.ladder.t1} · T2 +${s.ladder.t2} · T3 +${s.ladder.t3}`}<div class="fcs neg">${shortLadder === "tgt" ? `SL −${s.ladder.tgtsl} pts · ` : shortLadder === "eq" ? "" : `SL −${s.ladder.sl} pts · `}${s.horizonMin} min</div></td>
       <td class="num">${s.stats.calls}</td>
       <td class="num neg">${pc(lad ? m.stopRate : s.stats.slRate)}<div class="fcs">${lad ? "" : s.stats.SL + " calls"}</div></td>
       <td class="num">${lad ? "—" : pc(s.stats.t1Rate)}<div class="fcs">${lad ? "" : s.stats.T1 + " calls"}</div></td>
@@ -1449,8 +1611,8 @@ function renderShort() {
   const ladderCard = `<div class="proof-card">
       <div class="pf-h">Target size — how far T1 is from entry compared with the stop
         <span class="spacer"></span>
-        ${["tgt", "cur", "eq"].map((k) => `<button class="btn sh-lad ${shortLadder === k ? "btn-accent" : "ghost"}" data-l="${k}">${LADDER_LABELS[k]}</button>`).join(" ")}</div>
-      <div class="pf-note"><b>Target (default):</b> T1 and the stop are the same size — Nifty 25, Sensex 75, Bank Nifty 75 (same as Sensex), Next 50 80 — with T2 = 2× and T3 = 3×,
+        ${["tgt", "eq"].map((k) => `<button class="btn sh-lad ${shortLadder === k ? "btn-accent" : "ghost"}" data-l="${k}">${LADDER_LABELS[k]}</button>`).join(" ")}</div>
+      <div class="pf-note"><b>Target (default):</b> T1 and the stop are the same size — Nifty 25, Bank Nifty 60, Sensex 75 — with T2 = 2× and T3 = 3×,
         so a winning call books at least that much and Runner lets it run further. The price is a lower win rate (about 55–63%, not 70%+) and about 40% stop-outs, so the
         profit per call over ALL calls is small. <b>Judge by the NET average per call (all calls, losses subtracted)</b>, not the average winning call. <b>High win rate</b> is the earlier setup (T1 a fraction of the stop).<br>Same calls, single lot with the Runner rule — only the size of T1 and the stop change. A bigger T1 makes a winning call pay more, but T1 is then
         harder to reach first, so the <b>win rate falls</b>. This is basic probability: asking a trade to gain as much as it risks wins about half the time unless the edge is
@@ -1458,7 +1620,7 @@ function renderShort() {
         default keeps T1 small. <b>Tuned</b> picks the equal T1 = SL size per index and candle from older history (about 61% wins on the unseen last 60 days). Pick the trade-off you prefer.</div>
       <div class="table-wrap"><table class="research pf-table"><thead><tr><th>Profile</th><th>Win rate (T1 before SL)</th><th>Full stop-outs</th>
         <th><b>NET avg pts per call</b> (all calls, losses subtracted · Runner)</th><th>NET if you exit at T1 or the stop</th><th>Avg of a winning call only</th><th>…if you sell at T1</th><th>Profit factor</th></tr></thead>
-        <tbody>${["tgt", "cur", "eq"].map(ladRow).join("")}</tbody></table></div>
+        <tbody>${["tgt", "eq"].map(ladRow).join("")}</tbody></table></div>
     </div>`;
   const exitCard = `<div class="proof-card">
       <div class="pf-h">How to manage the call — one lot, no partial booking
@@ -1476,17 +1638,11 @@ function renderShort() {
   const method = Object.entries(d.method || {}).map(([k, v]) => `<li><b>${esc(labels[k] || k)}:</b> ${esc(v)}</li>`).join("");
   const noEdge = (d.noEdge || []).map((x) => x.name).join(" and ");
 
-  $("shortBody").innerHTML = `
-    <div class="proof-card">
-      <div class="pf-h">Candle size <span class="fc-badge">snapshot ${esc(d.istClock)} IST</span></div>
-      <div>${tfChips}</div>
-      <div class="pf-note">Pick a candle size (or All candles): the live read, calls and accuracy below are for that selection only.
-        A call is issued only where the strategy held ≥ ${d.target.winRate}% wins on older history <b>and</b> on the held-back last ${d.days} days.
-        ${esc(noEdge)} had no reliable edge on any candle size.</div>
-    </div>
-    ${t.calls ? ladderCard : ""}
-    ${t.calls ? exitCard : ""}
-    <div class="proof-card">
+  const navBtn = (k, label) => `<button class="btn sh-view ${shortView === k ? "btn-accent" : "ghost"}" data-v="${k}">${label}</button>`;
+  const nav = `<div class="view-nav">${navBtn("calls", "Calls")} ${navBtn("research", "Research &amp; accuracy")} ${navBtn("index", "Index pages")}
+    <span class="spacer"></span><span class="fc-badge">snapshot ${esc(d.istClock)} IST</span></div>`;
+  const chipsCard = `<div class="proof-card"><div>${tfChips}</div></div>`;
+  const statsCard = `    <div class="proof-card">
       <div class="pf-h">${tfLabel} · last ${d.days} days · ${t.calls ?? 0} calls</div>
       ${t.calls ? `<div class="pf-stats">
         <div><span>Win (${lad ? "T1 before SL, " + esc(LADDER_LABELS[shortLadder]) : "any target before SL"})</span><b class="${(lad ? tm.winRate : t.winRate) >= 70 ? "pos" : "neg"}">${pc(lad ? tm.winRate : t.winRate)}</b></div>
@@ -1503,8 +1659,8 @@ function renderShort() {
         <div><span>Median run before entry</span><b>${t.medianPreRun ?? "—"} pts</b></div>
       </div>` : `<div class="pf-note">No index has a validated strategy on ${shortTf}-minute candles, so no calls are issued here.
         The live read below is information only.</div>`}
-    </div>
-    ${isAll ? "" : `<div class="proof-card">
+    </div>`;
+  const liveCard = isAll ? "" : `<div class="proof-card">
       <div class="pf-h">Live read — what the ${shortTf}-minute candles say now</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:10px">
         ${blk.segments.map(shortLiveCard).join("")}
@@ -1512,9 +1668,8 @@ function renderShort() {
       <div class="pf-note">Bias counts five checks on completed candles (EMA9/21, EMA21/50, price vs VWAP, RSI, last 3 candles).
         Candlestick patterns and futures volume/OI are shown for context: in testing, requiring patterns did not raise the
         win rate, and futures history was too short to validate volume/OI, so neither gates a call.</div>
-    </div>`}
-    ${activeHtml}
-    ${segRows ? `<div class="proof-card">
+    </div>`;
+  const byIdxCard = segRows ? `<div class="proof-card">
       <div class="pf-h">By index — ${tfLabel}</div>
       <div class="table-wrap"><table class="research pf-table">
         <thead><tr><th>Index</th><th>Levels</th><th>Calls</th><th>SL</th><th>T1 only</th><th>T2 only</th><th>T3</th>
@@ -1522,32 +1677,49 @@ function renderShort() {
         <tbody>${segRows}</tbody></table></div>
       <div class="pf-note">Each call is counted once, at the highest target reached before the stop. "Older months" is the same
         strategy on the history before the last ${d.days} days, where it was chosen.</div>
-    </div>
-    <div class="proof-card">
-      <div class="pf-h">Every ${isAll ? "" : shortTf + "m "}call — ${rows.length} shown
-        <a class="btn ghost" href="/api/short?format=csv&tf=${shortTf}" download>Download CSV (${isAll ? "all candles" : shortTf + "m"})</a>
-        <span class="spacer"></span>
-        ${Object.entries(filters).map(([k, v]) => `<button class="btn ghost sh-f ${shortFilter === k ? "btn-accent" : ""}" data-f="${k}">${v}</button>`).join(" ")}
-      </div>
-      <div class="table-wrap" style="max-height:70vh;overflow:auto"><table class="research pf-table">
-        <thead><tr><th>Date · entry time</th><th>Candle</th><th>Index</th><th>Side</th><th>Entry</th><th>SL · touched</th>
-          <th>T1 · touched</th><th>T2 · touched</th><th>T3 · touched</th><th>Result</th><th>Plan pts</th>
-          <th>Plan exit</th><th>Patterns</th></tr></thead>
-        <tbody>${callRows || `<tr><td colspan="13" class="fcs">No calls for this filter.</td></tr>`}</tbody></table></div>
-      <div class="pf-note">Times are IST. "✓ 09:45 candle · within 10m" = the level was first touched during the candle that opened at
-        09:45, within 10 minutes of entry (entry = close of the signal candle). Every call is scored on the real 1-minute path, so
-        times are to the minute and the SL-versus-target order is exact (a touch of both inside one minute counts as the stop).
-        A level counts only if touched before the stop; "touched later" shows a stop hit after
-        targets were already reached (the result is unchanged). Plan exit = when the 1/3-each plan closed: all three targets booked,
-        the stop moved to entry after T1 was touched, or the window ended.</div>
-    </div>` : ""}
-    <div class="proof-card">
+    </div>` : "";
+  const howCard = `    <div class="proof-card">
       <div class="pf-h">How this works</div>
       <ul class="pf-method">${method}</ul>
       <div class="modal-actions"><span class="spacer"></span>
         <button class="btn ghost" id="shortReload">Replay again</button>
         <button class="btn" id="shortCloseBtn">Close</button></div>
     </div>`;
+
+  // ---- calls view: just the list
+  const lastDate = blk.calls.length ? blk.calls[0].date : "";
+  const norm = (r) => normShort(r, d);
+  let list = blk.calls.map(norm);
+  const scopes = { today: "Latest session", "5d": "Last 5 days", all: "All " + d.days + " days" };
+  if (shortScope === "today") list = list.filter((n) => n.date === lastDate);
+  else if (shortScope === "5d") { const ds = [...new Set(list.map((n) => n.date))].slice(0, 5); list = list.filter((n) => ds.includes(n.date)); }
+  const resF = { all: "All", hit: "Target hit", SL: "Stop hit", running: "Running" };
+  list = list.filter((n) => shortResult === "all" || (shortResult === "hit" ? /^T[123]$/.test(n.status) : shortResult === "running" ? n.status === "RUNNING" : n.status === shortResult));
+  const callsView = `${chipsCard}
+    <div class="proof-card">
+      <div class="pf-h">${shortTf === "all" ? "All candles" : shortTf + "-minute"} calls · ${list.length} shown
+        <span class="spacer"></span>
+        <a class="btn ghost" href="/api/short?format=csv&tf=${shortTf}" download>CSV</a></div>
+      <div style="margin-bottom:8px">${Object.entries(scopes).map(([k, v]) => `<button class="btn sh-scope ${shortScope === k ? "btn-accent" : "ghost"}" data-v="${k}">${v}</button>`).join(" ")}
+        &nbsp;|&nbsp; ${Object.entries(resF).map(([k, v]) => `<button class="btn sh-res ${shortResult === k ? "btn-accent" : "ghost"}" data-v="${k}">${v}</button>`).join(" ")}</div>
+      ${t.calls ? `<div class="pf-note"><b>${tm.winRate != null ? pc(tm.winRate) : "—"}</b> win · <b class="neg">${pc(tm.stopRate)}</b> stopped · net <b class="${(tm.avgPlanPts ?? 0) >= 0 ? "pos" : "neg"}">${pts(tm.avgPlanPts)}</b> pts per call over all ${t.calls} calls of the last ${d.days} days
+        (${esc(LADDER_LABELS[shortLadder] || "")}). More in "Research &amp; accuracy".</div>` : ""}
+      ${callListHtml(list, "sh", "No calls match this filter.")}
+    </div>`;
+
+  // ---- research view: every number, size choice and method (kept off the main page)
+  const researchView = `${chipsCard}${t.calls ? statsCard : ""}${t.calls ? ladderCard : ""}${t.calls ? exitCard : ""}${liveCard}${byIdxCard}${howCard}`;
+
+  // ---- index view: research and prediction logic for one index
+  const indexView = renderShortIndex(d, shortIndex, norm);
+
+  $("shortBody").innerHTML = nav + (shortView === "research" ? researchView : shortView === "index" ? indexView : callsView) +
+    `<div class="modal-actions"><span class="spacer"></span><button class="btn ghost" id="shortReload">Replay again</button><button class="btn" id="shortCloseBtn">Close</button></div>`;
+  bindCallList($("shortBody"), (seg) => { shortIndex = seg; shortView = "index"; renderShort(); });
+  document.querySelectorAll(".sh-view").forEach((b) => { b.onclick = () => { shortView = b.dataset.v; renderShort(); }; });
+  document.querySelectorAll(".sh-scope").forEach((b) => { b.onclick = () => { shortScope = b.dataset.v; renderShort(); }; });
+  document.querySelectorAll(".sh-res").forEach((b) => { b.onclick = () => { shortResult = b.dataset.v; renderShort(); }; });
+  document.querySelectorAll(".sh-idx").forEach((b) => { b.onclick = () => { shortIndex = b.dataset.i; renderShort(); }; });
   $("shortReload").onclick = openShort;
   $("shortCloseBtn").onclick = closeShort;
   document.querySelectorAll(".sh-f").forEach((b) => { b.onclick = () => { shortFilter = b.dataset.f; renderShort(); }; });

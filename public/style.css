@@ -566,3 +566,30 @@ table.n5-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 
 /* long badges (strategy ladder) must wrap inside their card */
 #shortBody .fc-badge, #activeBody .fc-badge, #scoreBody .fc-badge { white-space: normal; max-width: 100%; }
+
+.more-details{margin-top:14px;border:1px solid var(--line,#2a3140);border-radius:10px;padding:0 12px 12px}
+.more-details>summary{cursor:pointer;padding:12px 0;font-weight:600;color:var(--muted,#8b95a7)}
+.more-details[open]>summary{border-bottom:1px solid var(--line,#2a3140);margin-bottom:12px}
+
+.view-nav{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.call-list .cl-row{cursor:pointer}
+.call-list .cl-row:hover{background:rgba(120,140,180,.08)}
+.call-list .cl-row.cl-running{background:rgba(59,130,246,.10)}
+.call-list .cl-chev{color:var(--muted,#8b95a7);width:1.5em}
+.call-list .cl-det>td{padding:0;background:rgba(120,140,180,.05)}
+.cl-detail{padding:12px 14px}
+.cl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:10px}
+.cl-lvl{border:1px solid rgba(120,140,180,.25);border-radius:8px;padding:8px 10px}
+.cl-lvl .cl-k{display:block;font-size:.75rem;opacity:.7;text-transform:uppercase;letter-spacing:.04em}
+.cl-meta{display:flex;flex-direction:column;gap:4px;font-size:.88rem}
+.hidden{display:none!important}
+
+.call-list a.cl-idx,.cl-meta a.cl-idx{color:var(--accent,#5aa2ff);text-decoration:none;font-weight:600}
+.call-list a.cl-idx:hover,.cl-meta a.cl-idx:hover{text-decoration:underline}
+
+.more-menu{position:relative;display:inline-block}
+.more-menu>summary{list-style:none;cursor:pointer}
+.more-menu>summary::-webkit-details-marker{display:none}
+.more-pop{position:absolute;right:0;top:110%;z-index:60;display:flex;flex-direction:column;gap:6px;min-width:190px;padding:10px;border-radius:10px;
+  background:var(--panel,#0f1520);border:1px solid rgba(120,140,180,.3);box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.more-pop .btn{width:100%;text-align:left}

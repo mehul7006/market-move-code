@@ -2055,6 +2055,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
 
+        if parsed.path == "/api/recorder":
+            try:
+                import optrecorder
+                body = json.dumps(dict(optrecorder.summary(sys.modules[__name__]), enabled=optrecorder.enabled(sys.modules[__name__]))).encode("utf-8")
+                return self._send(200, body, "application/json; charset=utf-8")
+            except Exception as exc:
+                return self._send(500, json.dumps({"error": str(exc)}).encode("utf-8"), "application/json; charset=utf-8")
         if parsed.path == "/api/scorecard":
             try:
                 res = _serve("score", _score_loader, 3600, 3600)
@@ -2222,6 +2229,13 @@ def main():
     if LITE:
         sys.setswitchinterval(0.001)       # hand the interpreter lock to waiting request threads more often
     threading.Thread(target=_background_refresher, daemon=True, name="market-refresher").start()
+    try:
+        import optrecorder
+        if optrecorder.enabled(sys.modules[__name__]):
+            threading.Thread(target=optrecorder.loop, args=(sys.modules[__name__],), daemon=True, name="option-recorder").start()
+            print("Option-chain recorder ON (set RECORD_OPTIONS=0 to turn off)")
+    except Exception as exc:
+        print("Option-chain recorder not started:", exc)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

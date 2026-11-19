@@ -28,7 +28,7 @@ import server
 import shortterm as st
 
 DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 120
-S5 = {"NIFTY": 50, "BANKNIFTY": 140, "SENSEX": 150, "NEXT50": 160}
+S5 = {"NIFTY": 50, "BANKNIFTY": 140, "SENSEX": 150}
 IST = datetime.timezone.utc
 
 
@@ -69,8 +69,9 @@ def main():
         print("      WARNING: some bars are not tagged UPSTOX - review before trusting the result")
     series = {1: m1, 5: c5, 15: {k: st.resample(v, 15) for k, v in c5.items()}, 30: {k: st.resample(v, 30) for k, v in c5.items()}}
 
+    st.prepare_strict(series, now)
     rows, summary = [], {}
-    for tf in (1, 5, 15, 30):
+    for tf in (1, 5):
         calls_tf = []
         for seg in S5:
             p = st.STRATEGIES.get((seg, tf)) or (research_30m(seg) if tf == 30 else None)
@@ -90,19 +91,22 @@ def main():
 
     # ---------------------------------------------------------------- csv with every call
     out_csv = os.path.join(ROOT, f"short_term_test_{DAYS}d_calls.csv")
+    reasons = {"SL": "Stop loss touched", "BE": "Stop moved to entry after T1 - touched", "END": "Window ended - closed at last price"}
     with open(out_csv, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["candle_min", "issued_by_app", "index", "side", "generated_at_ist", "entry", "SL", "SL_touched_at",
-                    "T1", "T1_touched_at", "T1_after_min", "T2", "T2_touched_at", "T2_after_min", "T3", "T3_touched_at",
-                    "T3_after_min", "result_bucket", "single_lot_exit_at", "single_lot_exit_reason", "single_lot_points",
-                    "full_stop_out", "max_favourable_pts", "patterns"])
+        w.writerow(["date", "candle_min", "index", "side", "generated_at_ist", "entry", "SL", "SL_hit_at", "T1", "T1_hit_at", "T1_after_min",
+                    "T2", "T2_hit_at", "T2_after_min", "T3", "T3_hit_at", "T3_after_min", "result", "exit_at", "exit_reason",
+                    "points_single_lot", "win_T1_before_SL", "best_favourable_pts", "patterns", "signal", "grade"])
         for r in rows:
-            pl = r["plans"][r["exitStyle"]]
-            w.writerow([r["tf"], "NO (research only)" if r["notIssued"] else "yes", r["segment"], r["side"], clock(r["entryAt"]),
-                        r["entry"], r["sl"], clock(r.get("slAt")), r["t1"], clock(r.get("t1At")), r.get("t1After") or "",
-                        r["t2"], clock(r.get("t2At")), r.get("t2After") or "", r["t3"], clock(r.get("t3At")), r.get("t3After") or "",
-                        r["result"], clock(pl["exitAt"]), pl["reason"], pl["pts"], "yes" if pl["kind"] == "SL" else "no",
-                        r["mfe"], "; ".join(r.get("patterns") or [])])
+            v = (r.get("variants") or {}).get("tgt")
+            if not v:
+                continue
+            result = "SL" if (v["kind"] == "SL" and not v["win"]) else ("T%d" % v["best"] if v["best"] else "TIMEOUT")
+            w.writerow([clock(r["entryAt"])[:10], r["tf"], r["segment"], r["side"], clock(r["entryAt"]), r["entry"], v["sl"],
+                        clock(v["slAt"]) if v["kind"] == "SL" else "", v["t1"], clock(v["t1At"]), v["t1After"] or "",
+                        v["t2"], clock(v["t2At"]), v["t2After"] or "", v["t3"], clock(v["t3At"]), v["t3After"] or "",
+                        result, clock(v["exitAt"]), reasons.get(v["kind"], ""), v["pts"], "yes" if v["win"] else "no",
+                        r["mfe"], "; ".join(r.get("patterns") or []), r.get("family", ""), r.get("grade", "A")])
 
     # ---------------------------------------------------------------- report
     L = []
@@ -138,14 +142,14 @@ def main():
     P(f"Run {clock(now)} IST. Bars: {dict(src)}. Single-lot **Runner** rule: stop moves to entry once T1 is touched, then hold until the window ends or the stop is hit.")
     P("")
     P("**Win rate** = calls that reached T1, T2 or T3 before the stop. **Points per call** = average single-lot Runner points over ALL calls (losses included).")
-    scored = {tf: dict(collections.Counter(c["scoredOn"] for c in summary[tf])) for tf in (1, 5, 15, 30)}
+    scored = {tf: dict(collections.Counter(c["scoredOn"] for c in summary[tf])) for tf in (1, 5)}
     P("Path used to decide which level came first (1m = the real 1-minute candles): " + "; ".join(f"{tf}m calls -> {v}" for tf, v in scored.items()))
     P("")
     P("## T1 size - what a bigger T1 does (same calls, same stop, single lot, Runner rule)")
     P("T1 as a fraction of the stop. **Win rate = T1 reached before the stop.** The shipped default keeps T1 small because that is what holds 70%+ wins.")
     P("| Candle | T1 size | Win rate | Full stop-outs | Avg points / call | Avg points of a winning call |")
     P("|---|---|---|---|---|---|")
-    for tf in (1, 5, 15, 30):
+    for tf in (1, 5):
         calls = summary[tf]
         if not calls:
             continue
@@ -167,11 +171,11 @@ def main():
             P(f"| {tf}m{tag} | {label} | **{len(wins) / n * 100:.1f}%** | {stop / n * 100:.1f}% | {sum(pts) / n:+.1f} | {sum(wp) / len(wp) if wp else 0:+.1f} |")
     P("")
     P("## NET average per call - ALL calls, losses subtracted from profits (single lot)")
-    P("Real expectancy = (sum of every call's profit and loss) / number of calls. **Target** = T1 = SL = Nifty 25 / Sensex 75 / Bank Nifty 75 / Next 50 80; **Tuned** = equal T1 = SL per index and candle; **High win rate** = small-T1 ladder.")
+    P("Real expectancy = (sum of every call's profit and loss) / number of calls. **Target** = strict profile: T1 / stop = Nifty 22.5/25 / Bank Nifty 63/70 / Sensex 81/90; **Tuned** = equal T1 = SL per index and candle; **High win rate** = small-T1 ladder.")
     P("| Candle | Index | Profile | T1 = SL | Calls | Win rate | Full stop-outs | **NET avg pts per call (Runner)** | NET (exit at T1 or stop) | Avg of a winning call | Net pts per day | Total pts |")
     P("|---|---|---|---|---|---|---|---|---|---|---|---|")
-    sessions = len({c["date"] for tf_ in (1, 5, 15) for c in summary[tf_]}) or 1
-    for tf in (1, 5, 15):
+    sessions = len({c["date"] for tf_ in (1, 5) for c in summary[tf_]}) or 1
+    for tf in (1, 5):
         for seg in S5:
             for key, label in (("tgt", "Target"), ("eq", "Tuned"), ("cur", "High win rate")):
                 cc = [c for c in summary[tf] if c["segment"] == seg and (key == "cur" or key in c["variants"])]
@@ -200,7 +204,7 @@ def main():
     P("- **Bracket** = exit at T1 or at the stop. **Runner** = the single-lot rule used on the page. Both are what you could actually book. Index points; an at-the-money option moves roughly half as much as the index.")
     P("| Candle | Index | Calls | Win rate (T1 before SL) | Hindsight avg best move / call | Bracket avg pts / call | Runner avg pts / call |")
     P("|---|---|---|---|---|---|---|")
-    for tf in (1, 5, 15):
+    for tf in (1, 5):
         for seg in S5:
             cc = [c for c in summary[tf] if c["segment"] == seg]
             if not cc:
@@ -212,7 +216,7 @@ def main():
     P("## Summary by candle size")
     P("| Candle | Calls | **Win rate** | SL first | T1 only | T2 only | T3 | **Avg points / call** | Avg pts of winning calls | Avg gain (gaining calls) | Avg loss (losing calls) | Profit factor | Gaining / ≈0 / losing |")
     P("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-    for tf in (1, 5, 15, 30):
+    for tf in (1, 5):
         s = stats(summary[tf])
         tag = " *(NOT ISSUED - research setting)*" if tf == 30 else ""
         if not s:
@@ -222,7 +226,7 @@ def main():
           f"{f(s['avg_win_calls'])} | {f(s['avg_gain'])} | {f(s['avg_loss'])} | {f(s['pf'], 2)} | {f(s['gain'], 0)}% / {f(100 - s['gain'] - s['loss'], 0)}% / {f(s['loss'], 0)}% |")
     P("")
     P("(Points are index points, pooled across indices of different price levels - read the per-index tables below for like-for-like numbers.)")
-    for tf in (1, 5, 15, 30):
+    for tf in (1, 5):
         calls = summary[tf]
         if not calls:
             continue

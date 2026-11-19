@@ -63,7 +63,7 @@ def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, no
     rows = []
 
     # ------------------------------------------------------------------ short term (already tracked live)
-    # Levels, touch times and status follow the TARGET profile (T1 = SL = Nifty 25 / Sensex & Bank Nifty 75 / Next 50 80, T2 = 2x, T3 = 3x).
+    # Levels, touch times and status follow the TARGET profile (T1 = SL = T1 / stop: Nifty 22.5/25, Bank Nifty 63/70, Sensex 81/90, T2 = 2x, T3 = 3x).
     for c in short_payload["timeframes"]["all"]["calls"]:
         if c["date"] != session:
             continue
@@ -86,7 +86,8 @@ def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, no
             rows.append(_row("short", c["segment"], c["name"], "%sm" % c["tf"], c["side"], c["entryAt"], c["entry"],
                              v["sl"], v["t1"], v["t2"], v["t3"], touched, status, wend, now,
                              (ltps.get(c["segment"]) or {}).get("last"), c.get("scoredOn"),
-                             {"patterns": c.get("patterns") or [], "id": c["id"], "profile": "tgt"}))
+                             {"patterns": c.get("patterns") or [], "id": c["id"], "profile": "tgt", "family": c.get("family"), "grade": c.get("grade", "A"),
+                              "pts": v["pts"], "exitAt": v["exitAt"], "kind": v["kind"]}))
             continue
         touched = {k: c[k + "At"] for k in ("sl", "t1", "t2", "t3") if c.get(k + "At")}
         status = "RUNNING" if (c["result"] == "OPEN" or c.get("planAlive")) else c["result"]
@@ -94,6 +95,16 @@ def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, no
                          c["sl"], c["t1"], c["t2"], c["t3"], touched, status, wend, now,
                          (ltps.get(c["segment"]) or {}).get("last"), c.get("scoredOn"),
                          {"patterns": c.get("patterns") or [], "id": c["id"]}))
+
+    # short-term calls waiting for their confirmation move (entered only if price trades the trigger in time)
+    for c in short_payload.get("pending") or []:
+        if datetime.datetime.fromtimestamp(c["t"] + 19800, datetime.timezone.utc).strftime("%Y-%m-%d") != session:
+            continue
+        rows.append(_row("short", c["segment"], c["name"], "%sm" % c["tf"], c["side"], c["t"] + c["tf"] * 60, c["trigger"],
+                         c["sl"], c["t1"], c["t2"], c["t3"], {}, "WAITING", c["until"], now,
+                         (ltps.get(c["segment"]) or {}).get("last"), "1m",
+                         {"id": c["id"], "pending": True, "trigger": c["trigger"], "until": c["until"], "signalClose": c["signalClose"],
+                          "family": c.get("family"), "grade": "A"}))
 
     # ------------------------------------------------------------------ long term (scanned on the 1m path here)
     for c in today_payload.get("calls") or []:
@@ -146,7 +157,7 @@ def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, no
                     "so a touch counts the moment it happens. If one minute touches both the stop and a target, it is "
                     "scored as the stop.",
             "long": "Long-term calls are the original precision-profile calls (5m signals, wide stops).",
-            "short": "Short-term levels follow the Target profile: T1 and the stop are the same size (Nifty 25, Sensex and Bank Nifty 75, "
-                     "Next 50 80), T2 = 2x and T3 = 3x. Win rate there is about 55-63%.",
+            "short": "Short-term levels (T1 / stop): Nifty 22.5/25, Bank Nifty 63/70, Sensex 81/90 points - T1 is 90% of the stop - T2 = 2x and T3 = 3x T1. "
+                     "Tested out of sample: about 65-70% of calls reach T1 before the stop.",
         },
     }

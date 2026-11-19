@@ -39,7 +39,7 @@ import analysis
 
 TIMEFRAMES = (1, 5, 15, 30)
 SESSION_CLOSE_MIN = 15 * 60 + 30   # minute the last bar closes; a test may lower it to 15:15 to ignore the exchange's frozen tail
-SEGMENTS = {"NIFTY": "Nifty 50", "BANKNIFTY": "Bank Nifty", "SENSEX": "Sensex", "NEXT50": "Next 50"}
+SEGMENTS = {"NIFTY": "Nifty 50", "BANKNIFTY": "Bank Nifty", "SENSEX": "Sensex"}   # short term: these three only
 NO_EDGE = {"FINNIFTY": "Fin Nifty", "MIDCPNIFTY": "Midcap Select"}
 _COMMON = {"firstEntry": 9 * 60 + 25, "lastEntry": 14 * 60 + 15, "maxPerDay": 3}
 
@@ -75,29 +75,39 @@ EXIT_STYLES = tuple(MANAGE)
 # computed on the same calls with the single-lot Runner rule, never as the default.
 LADDER_RATIOS = (0.75, 1.0)
 # TARGET profile (the page default): T1 = SL = X points, T2 = 2X, T3 = 3X. X is set so that a WINNING call books a meaningful amount:
-# Nifty 25, Sensex 75, Bank Nifty 75 (same as Sensex), Next 50 80. Measured on real calls this gives an average win of about +24 to +30
+# Nifty 25, Sensex 75, Bank Nifty 75, Next 50 80. Tested and rejected: a 45-point stop for Sensex / Bank Nifty (earns clearly less on the two-signal
+# call set: Sensex 1m +14 vs +23, 5m +5 vs +15 per call), and requiring 1-3 other strategies to agree (win rate did not rise, calls fell). Measured on real calls this gives an average win of about +24 to +30
 # on Nifty and +69 to +108 on Sensex, at the price of a lower win rate (about 55-63%, not 70%+) and about 40% stop-outs.
-TARGET_X = {"NIFTY": 25, "BANKNIFTY": 75, "SENSEX": 75, "NEXT50": 80}
 # "eq" = T1 and the stop BOTH equal to `eqx` points (own stop, own T1), tuned per index and candle size from OLDER history only
 # (win rate >= 55%, best average points), then checked on the unseen last 60 days: pooled 61.1% wins over 429 calls. No size,
 # filter, new signal type, volume/OI feature or machine-learning gate reached 65-70% wins at T1 = SL (see README), so this is
 # offered as a choice with its real win rate beside it, never as the default.
 EXIT_LABELS = {"runner": "Runner (recommended)", "protect": "Protect early", "target": "Fixed T3 target"}
 
-# (segment, candle minutes) -> strategy. Pairs not listed issue no calls.
+# (segment, candle minutes) -> strategy. STRICT mode: calls are chosen across ALL candle sizes and six signal families by the per-index
+# score model in strict_model.json (see strict.py); a (segment, candle) entry here only carries that candle size's levels and window.
+# T1 = stop = X points (strict_model.json: Nifty 25, Bank Nifty 60, Sensex 75), T2 = 2X, T3 = 3X.
+import strict as _strict
+
+_X_DEFAULT = {"NIFTY": (22.5, 25), "BANKNIFTY": (63, 70), "SENSEX": (81, 90)}     # (T1, stop) in points, from strict_model.json; T1 >= 90% of the stop
+TARGET_X = {seg: float((_strict.model().get(seg) or {}).get("T1") or x[0]) for seg, x in _X_DEFAULT.items()}         # T1 distance
+TARGET_SL = {seg: float((_strict.model().get(seg) or {}).get("stop") or x[1]) for seg, x in _X_DEFAULT.items()}      # stop distance
 STRATEGIES = {
-    ("NIFTY", 1): _p("NIFTY", 1, "vwapx", "trend", 9, 15, 22, 15, 60, eqx=15),
-    ("BANKNIFTY", 1): _p("BANKNIFTY", 1, "vwapx", "trend", 13, 32, 63, 44, 120, eqx=44),
-    ("SENSEX", 1): _p("SENSEX", 1, "vwapx", "strong", 20, 47, 67, 47, 120, eqx=103),
-    # 5m / 15m stops were re-tuned with outcomes scored on the real 1-minute path (see module docstring): stops sit at
-    # ~0.3-0.4x the final target. Each held >= 70% wins on the older history AND on the held-back last 60 days.
-    ("NIFTY", 5): _p("NIFTY", 5, "vwapx", "strong", 8, 35, 50, 15, 120, eqx=15),
-    ("BANKNIFTY", 5): _p("BANKNIFTY", 5, "vwapx", "strong", 14, 98, 140, 42, 120, eqx=42),
-    ("SENSEX", 5): _p("SENSEX", 5, "vwapx", "strong", 22, 105, 150, 60, 120, eqx=48),
-    ("NEXT50", 5): _p("NEXT50", 5, "vwapx", "trend", 24, 112, 160, 64, 120, eqx=64),
-    ("SENSEX", 15): _p("SENSEX", 15, "vwapx", "strong", 26, 182, 260, 78, 120, smallSample=True, eqx=20),
-    ("NEXT50", 15): _p("NEXT50", 15, "vwapx", "trend", 28, 194, 277, 83, 120, smallSample=True, eqx=54),
+    (seg, tf): _p(seg, tf, "strict", "trend", TARGET_X[seg], 2 * TARGET_X[seg], 3 * TARGET_X[seg], TARGET_SL[seg], _strict.HORIZON_MIN[tf], strict=True,
+                  confirm=(_strict.RULES.get(seg) or {}).get("confirm"))
+    for seg in _X_DEFAULT for tf in _strict.TFS
 }
+assert all(TARGET_X[k] >= 0.9 * TARGET_SL[k] - 1e-9 for k in TARGET_X), "short-term T1 must be at least 90% of the stop"
+_PENDING = {}   # (segment, candle minutes) -> calls waiting for their confirmation move right now
+_PICKS = {}   # (segment, candle minutes) -> {candle open time: (side, score, family)}, set by prepare_strict()
+
+
+def prepare_strict(candles_by_tf, now, days=200):
+    """Choose the calls for every index (all candle sizes together) before any replay()."""
+    _PICKS.clear()
+    _PENDING.clear()
+    _PICKS.update(_strict.prepare(candles_by_tf, now, days=days))
+
 
 # what testing found where a pair has no strategy (shown to the user instead of an invented call)
 NO_STRATEGY_NOTE = {
@@ -227,14 +237,35 @@ def _round(x, nd=2):
     return None if x is None else round(x, nd)
 
 
-def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
+def _confirm_fill(cs, i, sign, p, fine, now):
+    """Confirmation entry: the first 1-minute bar (after the signal candle closed) that trades `d` points further in the call's direction,
+    within `wait` minutes. Returns ("fill", minute_start, price) / ("pending", trigger, until) / ("skip", trigger, None)."""
+    d, wait = p["confirm"]
+    tf = p["tf"]
+    te = cs[i]["t"] + tf * 60
+    trigger = cs[i]["close"] + sign * d
+    until = te + wait * 60
+    bars = fine if tf > 1 else (cs[i + 1:] + [c for c in (fine or []) if c["t"] > cs[-1]["t"]])
+    for c in bars or []:
+        if c["t"] < te:
+            continue
+        if c["t"] >= until:
+            break
+        if (sign > 0 and c["high"] >= trigger) or (sign < 0 and c["low"] <= trigger):
+            return "fill", c["t"], trigger
+    if now is not None and now < until:
+        return "pending", trigger, until
+    return "skip", trigger, None
+
+
+def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None, fill=None):
     """Walk the path after the entry candle and return the call outcome fields.
 
     The path is the real 1-minute candles when they are available for the whole window (so we know
     whether the stop or a target was touched FIRST, instead of guessing inside a 5m/15m candle),
     otherwise the signal candles themselves with the conservative rule "a candle touching both counts
     as the stop"."""
-    entry = cs[i]["close"]
+    entry = cs[i]["close"] if not fill else fill[1]
     n, tf = len(cs), p["tf"]
     t1, t2, t3, sl = p["t1"], p["t2"], p["t3"], p["sl"]
     day_start = cs[i]["t"] - ((cs[i]["t"] + 19800) % 86400)
@@ -242,13 +273,13 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     end = i
     while end + 1 < n and cs[end + 1]["t"] <= deadline and _day(cs[end + 1]["t"]) == _day(cs[i]["t"]):
         end += 1
-    te = cs[i]["t"] + tf * 60                 # entry = close of the signal candle
+    te = cs[i]["t"] + tf * 60 if not fill else fill[0]   # entry = close of the signal candle, or the minute the confirmation traded
     # full scoring window = signal candle + horizon candles, capped at the close. Open calls are tracked all the
     # way to "now" on the 1-minute path INCLUDING the still-forming minute, so a touch counts the moment the
     # minute's high/low reaches a level, without waiting for any candle to complete.
     wfull = min(cs[i]["t"] + (p["horizon"] + 1) * tf * 60, day_start + SESSION_CLOSE_MIN * 60)
     covered_to = min(cs[end]["t"] + tf * 60, day_start + SESSION_CLOSE_MIN * 60)   # the last 30m candle ends after the close
-    path, step, res = cs[i + 1:end + 1], tf * 60, "%sm" % tf
+    path, step, res = [c for c in cs[i + 1:end + 1] if c["t"] >= te], tf * 60, "%sm" % tf
     if fine and tf > 1:
         a, b = bisect.bisect_left(fine_t, te), bisect.bisect_left(fine_t, wfull)
         avail_end = min(wfull, fine_t[b - 1] + 60) if b > a else te
@@ -363,7 +394,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
     if p.get("eqx"):
         variants["eq"] = variant(p["eqx"], p["eqx"])
     if TARGET_X.get(p["seg"]):
-        variants["tgt"] = variant(TARGET_X[p["seg"]], TARGET_X[p["seg"]])
+        variants["tgt"] = variant(TARGET_X[p["seg"]], TARGET_SL[p["seg"]])
     return {"bucket": bucket, "endIdx": end, "mfe": _round(mfe, 1), "res": res,
             "live": bool(path) and now is not None and (path[-1]["t"] + 60 > now if res == "1m" else False),
             "plans": {k: {"pts": _round(v["pts"], 1), "exitAt": v["endT"], "exitAfter": after(v["endT"]),
@@ -376,7 +407,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None):
                 -sl if bucket == "SL" else {1: t1, 2: t2, 3: t3}.get(maxhit, last)), 2)}
 
 
-def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
+def _replay_one(cs, p, since_ts=None, fine=None, now=None, until_ts=None, picks=None):
     """Every call strategy `p` would have issued on `cs` (completed candles of p['tf'] minutes).
     `fine` = real 1-minute candles used to decide which level came first."""
     tf = p["tf"]
@@ -388,22 +419,41 @@ def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
     lookback = max(1, 60 // tf)
     # the latest completed candle may itself be a signal, so a fresh call appears as soon as its candle closes
     for i in range(60, len(cs)):
-        if cs[i]["t"] <= blocked_t:            # one trade at a time: wait for the previous window to end
+        if picks is None and cs[i]["t"] <= blocked_t:            # one trade at a time: wait for the previous window to end
             continue
         if since_ts and cs[i]["t"] < since_ts:
             continue
         if until_ts and cs[i]["t"] >= until_ts:
             break
-        s = _signal(cs, F, i, p)
+        pk = None
+        if picks is not None:                   # strict mode: the cross-candle selection already applied every rule
+            pk = picks.get(cs[i]["t"])
+            s = pk[0] if pk else 0
+        else:
+            s = _signal(cs, F, i, p)
         if not s:
             continue
         d = _day(cs[i]["t"])
-        if per_day[d] >= p["maxPerDay"]:
+        if picks is None and per_day[d] >= p["maxPerDay"]:
             continue
-        tr = _trade(cs, i, s, p, fine, fine_t, now)
+        fill = None
+        if p.get("confirm"):
+            how, a1, a2 = _confirm_fill(cs, i, s, p, fine, now)
+            if how == "pending":
+                _PENDING.setdefault((p["seg"], tf), []).append({
+                    "segment": p["seg"], "tf": tf, "name": p["name"], "t": cs[i]["t"], "side": "BUY" if s > 0 else "SELL",
+                    "signalClose": _round(cs[i]["close"]), "trigger": _round(a1), "until": a2, "sl": _round(a1 - s * p["sl"]),
+                    "t1": _round(a1 + s * p["t1"]), "t2": _round(a1 + s * p["t2"]), "t3": _round(a1 + s * p["t3"]),
+                    "slPts": p["sl"], "t1Pts": p["t1"], "t2Pts": p["t2"], "t3Pts": p["t3"], "family": (pk[2] if pk else p["family"]),
+                    "id": "%s-%s-%s" % (p["seg"], tf, cs[i]["t"])})
+                continue
+            if how == "skip":
+                continue
+            fill = (a1, a2)
+        tr = _trade(cs, i, s, p, fine, fine_t, now, fill=fill)
         per_day[d] += 1
-        blocked_t = cs[i]["t"] + p["horizon"] * tf * 60
-        e = cs[i]["close"]
+        blocked_t = cs[i]["t"] + p["horizon"] * tf * 60 * p.get("gapFrac", 1.0)   # 1.0 = one trade at a time
+        e = cs[i]["close"] if not fill else fill[1]
         stamp = datetime.datetime.fromtimestamp(cs[i]["t"] + 19800, datetime.timezone.utc)
         bull, bear = patterns(cs, i, F["atr"][i])
         pb, pr = patterns(cs, i - 1, F["atr"][i - 1])
@@ -418,14 +468,15 @@ def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
             "t2": _round(e + s * p["t2"]), "t3": _round(e + s * p["t3"]),
             "slPts": p["sl"], "t1Pts_": p["t1"], "t2Pts_": p["t2"], "t3Pts_": p["t3"],
             "result": tr["bucket"], "scoredOn": tr["res"], "minutes": tr["minutes"],
-            "t1Min": tr["t1After"], "entryAt": cs[i]["t"] + tf * 60,
+            "t1Min": tr["t1After"], "entryAt": cs[i]["t"] + tf * 60 if not fill else fill[0],
+            "confirmed": bool(fill), "signalClose": _round(cs[i]["close"]),
             "t1At": tr["t1At"], "t2At": tr["t2At"], "t3At": tr["t3At"], "slAt": tr["slAt"],
             "t1After": tr["t1After"], "t2After": tr["t2After"], "t3After": tr["t3After"],
             "slAfter": tr["slAfter"], "exitStyle": style, "plans": tr["plans"], "variants": tr["variants"],
             "planExitAt": pr["exitAt"], "planReason": pr["reason"], "planExitAfter": pr["exitAfter"],
             "planAlive": pr["alive"],
             "exit": tr["exit"], "mfe": tr["mfe"], "planPts": pr["pts"], "t1ExitPts": tr["t1Pts"],
-            "live": tr["live"], "id": "%s-%s-%s" % (p["seg"], tf, cs[i]["t"]),
+            "live": tr["live"], "id": "%s-%s-%s%s" % (p["seg"], tf, cs[i]["t"], "-b" if p.get("isAlt") else ""), "family": (pk[2] if pk else p["family"]), "score": (pk[1] if pk else None), "grade": (pk[3] if pk else "A"),
             "preRun": _round((e - cs[i - lookback]["close"]) * s, 1),
             "patterns": sorted(set(mine)),
         })
@@ -524,7 +575,9 @@ def live_read(cs, tf, p):
     pb, pr = patterns(cs, i - 1, F["atr"][i - 1])
     setup = None
     if p:
-        if p["family"] == "vwapx":
+        if p["family"] == "strict":
+            setup = "Strict mode: a call needs a high score from the six signal types and no other call open for this index."
+        elif p["family"] == "vwapx":
             setup = ("Watching for price to reclaim VWAP from below in an up-trend, or lose it from above in a "
                      "down-trend. Price is %s pts %s VWAP." % (_round(abs(px - vw), 1), "above" if px > vw else "below"))
         else:
@@ -547,6 +600,24 @@ def _usable(cands, tf, now):
     return out
 
 
+ALT_DEDUP_MIN = 20   # an alternate-family call is dropped when the main family already called the same side this close in time
+
+
+def replay(cs, p, since_ts=None, fine=None, now=None, until_ts=None):
+    """Calls of the main family plus the OTHER family (VWAP reclaim <-> trend pullback) on the same candles, so each index and
+    candle size issues about twice as many calls. Measured on 120 days of real data both families win about the same
+    (58% at T1 = SL, 76% with the small T1), so the extra calls keep the same quality. Set p['alt'] = False to turn this off."""
+    if p.get("strict"):
+        return _replay_one(cs, p, since_ts=since_ts, fine=fine, now=now, until_ts=until_ts, picks=_PICKS.get((p["seg"], p["tf"]), {}))
+    main = _replay_one(cs, p, since_ts=since_ts, fine=fine, now=now, until_ts=until_ts)
+    if p.get("alt") is False or p.get("isAlt"):
+        return main
+    other = dict(p, family="pullback" if p["family"] == "vwapx" else "vwapx", isAlt=True)
+    extra = _replay_one(cs, other, since_ts=since_ts, fine=fine, now=now, until_ts=until_ts)
+    keep = [c for c in extra if not any(m["side"] == c["side"] and abs(m["t"] - c["t"]) <= ALT_DEDUP_MIN * 60 for m in main)]
+    return sorted(main + keep, key=lambda c: c["t"])
+
+
 _HIST = {}   # (segment, tf, IST day) -> calls of earlier days; they can no longer change, so compute once a day
 
 
@@ -554,6 +625,7 @@ def build(candles_by_tf, days=60, now=None, futures=None):
     """candles_by_tf: {tf_minutes: {segment: [candles]}}. Returns the API payload with one block per candle size."""
     now = now or time.time()
     futures = futures or {}
+    prepare_strict(candles_by_tf, now)
     blocks = {}
     for tf in TIMEFRAMES:
         segments, all_calls, active = [], [], []
@@ -577,8 +649,8 @@ def build(candles_by_tf, days=60, now=None, futures=None):
                 ent["note"] = NO_STRATEGY_NOTE.get(tf, NO_STRATEGY_NOTE["default"])
                 continue
             ent.update(family=p["family"],
-                       familyLabel="VWAP reclaim in a trend" if p["family"] == "vwapx" else "Trend pullback resume",
-                       ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"], "eqx": p.get("eqx"), "tgtx": TARGET_X.get(p["seg"])},
+                       familyLabel="Strict multi-strategy score (6 signal types)",
+                       ladder={"t1": p["t1"], "t2": p["t2"], "t3": p["t3"], "sl": p["sl"], "eqx": p.get("eqx"), "tgtx": TARGET_X.get(p["seg"]), "tgtsl": TARGET_SL.get(p["seg"])},
                        horizonMin=p["horizonMin"], exitStyle=p.get("exit", "runner"))
             raw1 = (candles_by_tf.get(1) or {}).get(seg) or []
             live1 = [c for c in raw1 if c["t"] <= now]                       # includes the forming minute
@@ -613,6 +685,7 @@ def build(candles_by_tf, days=60, now=None, futures=None):
     }
     ist = time.gmtime(now + 19800)
     return {
+        "pending": [x for v in _PENDING.values() for x in v],
         "generatedAt": int(now), "istClock": time.strftime("%Y-%m-%d %H:%M:%S", ist), "days": days,
         "target": {"winRate": 70}, "timeframes": blocks,
         "noEdge": [{"id": k, "name": v} for k, v in NO_EDGE.items()],

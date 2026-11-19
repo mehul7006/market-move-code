@@ -136,6 +136,7 @@ def long_rows(server, c5_by_seg, m1_by_seg, now):
 # ------------------------------------------------------------------ short term
 def short_rows(cmap, now):
     out = {}
+    shortterm.prepare_strict(cmap, now)
     for tf in shortterm.TIMEFRAMES:
         rows = []
         for seg, label in shortterm.SEGMENTS.items():

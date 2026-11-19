@@ -532,3 +532,56 @@ candles and reports which level was touched first, when, the win rate, the point
 ~40-50 and Sensex ~180 points per call while the tradeable average is +2 to +19: the same calls produce a "30-40 per call, 70-80% wins" headline
 when counted by hindsight. Telegram groups also usually quote option-premium points (an ATM option moves roughly half as much as the index).
 `python test_short_term.py 120` prints the three ways of counting side by side for every index and candle size.
+
+## Strict short-term selection (Nifty, Bank Nifty, Sensex)
+`strict.py` scans six signal types (VWAP reclaim, trend pullback, opening-range breakout, EMA cross, 20-candle breakout, MACD cross) and scores every signal
+with a per-index model (`strict_model.json`, fitted by `python train_strict.py` on real Upstox candles). Each index has its own rules (`strict.RULES`, `train_strict.py`):
+
+| Index | T1 / stop | Candles | Share of signals that become calls |
+|---|---|---|---|
+| Nifty | 22.5 / 25 | 1m + 5m | top 10% |
+| Bank Nifty | 63 / 70 | 1m only | top 5% |
+| Sensex | 81 / 90 | 5m only | top 40% |
+
+T1 is 90% of the stop (never smaller); T2 = 2x and T3 = 3x T1. One open call per index at a time (a 1m and a 5m signal at the same moment count once), at most 5 a day.
+Out-of-sample (trained on earlier data, tested on three 30-day blocks): Nifty 2.2 calls/session, 65.1% wins, +9.7 pts/call; Bank Nifty 1.2, 70.3%, +35.7;
+Sensex 2.0, 66.9%, +38.5; all three 324 calls, 67.0%, +26.4 per call, +8,553 points. 120-day replay: 449 calls, 57.9% wins, +22.7 per call, +10,196 points.
+Tested and rejected (did not hold up): 10 extra inputs (peer-index direction, previous-day levels, gap, streaks, a slower timeframe), a boosted-stump model, and
+stronger ridge / recency weighting (better out of sample but worse on the 120-day replay, so treated as noise). The rules were the best of many combinations
+on that same test, so expect live results somewhat lower. `strict.CROSS_DEDUPE_MIN = 5` would
+count the same side called on several indexes within 5 minutes as ONE call (best score kept); it is off because it removes profitable calls.
+Re-run `train_strict.py` (needs a valid Upstox token) every few weeks; `python test_short_term.py 120` lists every call of the last 120 days.
+
+### B tier (more calls) - tested, off by default
+`strict_model.json` also holds a looser threshold per index (`thrB`: Nifty top 15%, Sensex top 50%; Bank Nifty none - its extra calls lost money). Turned on
+(`STRICT_B_TIER=1`) it adds ~0.5-1.4 calls a session, labelled "B tier" on the page. Out of sample the B calls won about 59%, but on the 120-day replay they won
+49.5% (+9.4 per call) and lowered the totals (494 calls, 55.7% wins, +18.2 per call, +9,001 points against 449 calls, 57.9%, +22.7, +10,196 without them),
+so it stays off.
+
+## Option-chain recorder
+`optrecorder.py` saves a snapshot of every index's near-expiry option chain (OI, change in OI, volume, IV, delta/gamma/theta/vega for the strikes around the
+money, put/call ratio, plus futures OI/volume) every 5 minutes while the market is open, to `<CACHE_DIR>/optrec/<INDEX>_<YYYYMMDD>.jsonl`. Upstox serves no history of
+these without the Plus plan, so this starts one. It runs inside the server (on by default; `RECORD_OPTIONS=0` turns it off; off on the Render free tier unless
+`RECORD_OPTIONS=1`, because the free disk is wiped when the service sleeps). `python optrecorder.py --summary` or `/api/recorder` show what has been recorded;
+after a few weeks the fields can be added to `train_strict.py` as inputs and tested walk-forward like everything else. Only real Upstox data is stored.
+
+### Confirmation entry (Sensex)
+A Sensex call is entered only if price trades 4.5 points beyond the signal close, in the call's direction, within 10 minutes (a stop-entry order); the levels are
+measured from that price, otherwise the call is cancelled (`strict.RULES[...]["confirm"]`). Out-of-sample: 70.2% wins and +54 per call against 66.9% / +38.5, better in
+every 30-day block; 120-day replay: 58.8% wins, +42.6 per call, +7,751 points against 58.0%, +37.2, +7,182. Tested and not used: Nifty (more wins out of sample, lower
+net on the replay), Bank Nifty (worse), pull-back limit entries (fewer wins: the calls that pull back are the ones that fail) and a two-model consensus gate (no gain).
+While a call waits for its trigger the Today's calls page shows it as "BUY ABOVE x until hh:mm".
+
+### What drives accuracy (driver analysis) and the Sensex quality filter
+Among the calls the strategy issues, the inputs that separated winners from losers most (out of sample, low third vs high third of the input):
+Nifty - move so far today (58% vs 77% wins), how many other signal types agree (59% vs 72%); Bank Nifty - position in the day's range (57% vs 82%);
+Sensex - run-up before the signal (74% vs 63%), distance from VWAP (78% vs 68%), RSI stretch (70% vs 61%). Each "skip the weakest third" filter was tested;
+only Sensex's (skip calls whose RSI is already stretched in the call's direction, `strict.FILTERS`) improved both the win rate and the net in every 30-day block
+AND on the 120-day replay (Sensex 62.0% wins, +63.4 per call against 58.8%, +42.6). The Nifty and Bank Nifty filters looked good out of sample but lowered the net on
+the replay, so they are off. 120-day replay, all three indexes: 377 calls, 59.2% wins, +28.4 per call, +10,690 points (before: 438 calls, 58.2%, +24.6, +10,764).
+
+### Dedicated Nifty strategy
+Searched: stops 25-60 (T1 90-100% of the stop), model target, candle sizes, time windows, strictness, confirmation entries and one quality filter, each judged out of
+sample AND on the 120-day replay. Chosen: T1 22.5 / stop 25, 5-minute candles only, model trained on "T1 before the stop", top 10% of scores, signals before 09:40 skipped.
+Out-of-sample 42 calls, 73.8% wins, +20.9 per call; 120-day replay 67 calls, 64.2% wins, +14.5 per call (before: 156 calls, 56.4%, +9.3). Larger stops (30-60) did not
+reach 62% wins with a positive net in every block. All three indexes on the replay: 288 calls, 61.8% wins, +35.5 per call, +10,214 points.

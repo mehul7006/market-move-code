@@ -17,6 +17,15 @@ ENV_PATH = os.environ.get("DESK_ENV_FILE") or os.path.join(ROOT, ".env")
 ENV_KEYS = ("DESK_USER", "DESK_PASS", "DESK_ADMIN_KEY", "UPSTOX_API_KEY", "UPSTOX_API_SECRET", "UPSTOX_ACCESS_TOKEN")
 
 
+def _exp(token):
+    try:
+        import base64, json
+        p = token.split(".")[1]
+        return int(json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))["exp"])
+    except Exception:
+        return 0
+
+
 def _from_environ():
     return {k: os.environ[k].strip() for k in ENV_KEYS if os.environ.get(k, "").strip()}
 
@@ -45,7 +54,14 @@ def current(path=ENV_PATH):
         return _from_environ()
     with _lock:
         if _cache["mtime"] != mtime:
-            _cache["env"] = {**_from_environ(), **load_env(path)}
+            env_vars, file_vars = _from_environ(), load_env(path)
+            merged = {**env_vars, **file_vars}
+            # The access token expires every night. If the host's environment variable holds a NEWER token than the saved
+            # file (e.g. the Render dashboard was updated), the one that lasts longer wins.
+            a, b = env_vars.get("UPSTOX_ACCESS_TOKEN"), file_vars.get("UPSTOX_ACCESS_TOKEN")
+            if a and b and _exp(a) > _exp(b):
+                merged["UPSTOX_ACCESS_TOKEN"] = a
+            _cache["env"] = merged
             _cache["mtime"] = mtime
         return dict(_cache["env"])
 
