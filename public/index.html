@@ -111,7 +111,7 @@
         <p class="modal-sub">Paste a fresh Upstox access token, or the full address you were redirected
           to after logging in. It is checked with Upstox first, then saved to the gitignored <b>.env</b>
           and applied to the running server — no restart, no code edit.</p>
-        <p class="modal-sub"><b>Why it asks again:</b> an Upstox access token is valid only until about 03:30 IST the next morning. On Render's free plan the
+        <p class="modal-sub"><b>Two tokens:</b> paste the daily token as usual, and (once) Upstox's 1-year Analytics token — it is stored as an automatic fallback and takes over whenever the daily token expires. <b>Why it asks again:</b> an Upstox access token is valid only until about 03:30 IST the next morning. On Render's free plan the
           disk is wiped whenever the service sleeps, so a token pasted here is forgotten. Put the token in the Render environment variable
           <b>UPSTOX_ACCESS_TOKEN</b> (it survives restarts), or use Upstox's 1-year read-only <b>Analytics token</b>.</p>
       </div>

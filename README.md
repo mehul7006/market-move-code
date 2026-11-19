@@ -615,3 +615,11 @@ environment variable **UPSTOX_ACCESS_TOKEN** once. The app accepts it (it valida
 sleeping and redeploys, and a newer token in the environment always beats an older saved one. When the token is expired or invalid the page now shows ONE calm sentence
 ("Upstox access token expired or invalid - open Access and paste a fresh token ...") instead of raw errors, keeps showing the last data, and stops calling Upstox for 2 minutes
 at a time instead of hammering it; saving a new token clears that pause immediately.
+
+### Two tokens: daily token + 1-year Analytics token (automatic fallback)
+`UPSTOX_ACCESS_TOKEN` = the normal daily token; `UPSTOX_ANALYTICS_TOKEN` = Upstox's 1-year read-only Analytics token (both in the gitignored `.env`, or as Render environment variables;
+`render.yaml` has an empty slot for each so Render asks for the values - never commit them). The app uses the daily token while it is valid. When it is expired, missing or rejected
+(HTTP 401 "invalid token") it switches to the Analytics token automatically, for that call and the following ones, and goes back to the daily token as soon as a fresh one is saved.
+Pasting a token in the Access panel works for both: an Analytics token (its payload says `isExtended`) is saved as the fallback and leaves the daily token alone. Checked against the real
+API with the Analytics token: quotes, 1m / 5m / daily candles (live and historical), option expiries and the option chain with OI, volume and greeks all work. It cannot read the user
+profile (Upstox refuses that for it), which the app does not need. `/api/token` shows both tokens' status.

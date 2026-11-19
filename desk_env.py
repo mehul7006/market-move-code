@@ -14,7 +14,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.environ.get("DESK_ENV_FILE") or os.path.join(ROOT, ".env")
 # Settings that may also come from real environment variables (Render dashboard / docker -e). A value saved in the
 # file (for example a token pasted in the Access panel) wins over the environment variable.
-ENV_KEYS = ("DESK_USER", "DESK_PASS", "DESK_ADMIN_KEY", "UPSTOX_API_KEY", "UPSTOX_API_SECRET", "UPSTOX_ACCESS_TOKEN")
+ENV_KEYS = ("DESK_USER", "DESK_PASS", "DESK_ADMIN_KEY", "UPSTOX_API_KEY", "UPSTOX_API_SECRET", "UPSTOX_ACCESS_TOKEN", "UPSTOX_ANALYTICS_TOKEN")
 
 
 def _exp(token):

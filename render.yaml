@@ -4,8 +4,12 @@
 # sleeps after ~15 min without visitors, 750 free hours a month):
 #   * LITE_MODE=1 makes the app safe on that hardware: it never makes a request wait for a heavy build (the page shows
 #     "waking up" and retries), refreshes only while someone is looking, and serves a precomputed 6-month scorecard.
-#   * No disk: a token pasted in the Access panel lives until the instance restarts. After a restart, paste it again
-#     (or update the UPSTOX_ACCESS_TOKEN environment variable in the Render dashboard).
+#   * No disk: a token pasted in the Access panel lives until the instance restarts.
+#     TOKENS (set them once in the Render dashboard -> your service -> Environment; the secret values are NEVER written in this file):
+#       - UPSTOX_ANALYTICS_TOKEN  = Upstox's 1-year read-only Analytics token (Developer Apps -> your app -> Analytics). Set it ONCE; it survives
+#                                   sleeping and redeploys, and the app switches to it automatically whenever the daily token is expired.
+#       - UPSTOX_ACCESS_TOKEN     = the normal daily token (optional; expires ~03:30 IST every night). With the Analytics token set you do not
+#                                   need to touch it - paste a fresh one only if you want the full-access token for the live calls.
 #   * To stop it sleeping, point a free uptime pinger (UptimeRobot / cron-job.org) at /healthz every 10 minutes.
 services:
   - type: web
@@ -28,5 +32,7 @@ services:
         sync: false
       - key: UPSTOX_API_SECRET
         sync: false
-      - key: UPSTOX_ACCESS_TOKEN # optional here: you can paste it later in the Access panel instead
+      - key: UPSTOX_ANALYTICS_TOKEN  # paste the 1-year Analytics token here ONCE (Render asks for it when you create the Blueprint)
+        sync: false
+      - key: UPSTOX_ACCESS_TOKEN # optional: the daily token; the Analytics token takes over automatically when it expires
         sync: false

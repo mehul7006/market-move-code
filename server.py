@@ -43,7 +43,8 @@ _cycle = {"sec": 3}
 
 ENV = desk_env.current()
 TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN") or ENV.get("UPSTOX_ACCESS_TOKEN", "")
-UX = upstox.UpstoxClient(TOKEN)
+ANALYTICS_TOKEN = os.environ.get("UPSTOX_ANALYTICS_TOKEN") or ENV.get("UPSTOX_ANALYTICS_TOKEN", "")
+UX = upstox.UpstoxClient(TOKEN, ANALYTICS_TOKEN or None)
 _token_lock = threading.Lock()
 
 # Nifty 50 stock book: additive to the six index segments. Quotes and breadth answer every
@@ -281,10 +282,14 @@ def _auth_config():
 
 def _sync_token_from_env():
     """Pick up a token written by upstox_login.py or the Access panel without a restart."""
-    tok = desk_env.current().get("UPSTOX_ACCESS_TOKEN") or ""
+    env_now = desk_env.current()
+    atok = env_now.get("UPSTOX_ANALYTICS_TOKEN") or ""
+    if atok and atok != UX.fallback:
+        UX.fallback = atok
+    tok = env_now.get("UPSTOX_ACCESS_TOKEN") or ""
     if tok and tok != UX.token:
         with _token_lock:
-            UX.token = tok
+            UX.set_primary(tok)
             with _cache_lock:
                 _cache.clear()
             _payload.update({"t": 0.0, "data": None})
@@ -340,15 +345,30 @@ def _ngrok_url():
     return url
 
 
+def _is_analytics(token):
+    """Upstox's long-lived read-only token carries "isExtended": true in its payload."""
+    try:
+        p = token.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return bool(json.loads(base64.urlsafe_b64decode(p)).get("isExtended"))
+    except Exception:
+        return False
+
+
 def token_status():
     with _token_lock:
         token = UX.token
     left = upstox.token_seconds_left(token) if token else None
+    a_left = upstox.token_seconds_left(UX.fallback) if UX.fallback else None
+    primary_ok = bool(token) and (left is None or left > 0) and not upstox.GOVERNOR.token_blocked(token)
     user, password, admin_key = _auth_config()
     return {
-        "configured": bool(token),
+        "configured": bool(token) or bool(UX.fallback),
         "expiresInSec": left,
         "expiresLabel": _expires_label(left),
+        "dailyToken": {"configured": bool(token), "valid": primary_ok, "expiresLabel": _expires_label(left)},
+        "analyticsToken": {"configured": bool(UX.fallback), "expiresLabel": _expires_label(a_left), "inUse": bool(UX.using_fallback or (UX.fallback and not primary_ok)),
+                           "switches": UX.switches},
         "feed": _feed_probe(),
         "publicUrl": _ngrok_url(),
         "siteLogin": bool(user and password),
@@ -380,9 +400,30 @@ def _extract_token(raw):
     return raw
 
 
+def apply_analytics_token(token):
+    """Save Upstox's long-lived read-only Analytics token as the automatic fallback (the daily token, if any, stays the primary)."""
+    left = upstox.token_seconds_left(token)
+    if left is not None and left <= 0:
+        raise ValueError("that Analytics token is already expired; generate a fresh one")
+    probe = upstox.UpstoxClient(token)
+    probe.quotes([INSTRUMENTS[0]["key"]])            # proves it can read market data
+    desk_env.write_var("UPSTOX_ANALYTICS_TOKEN", token)
+    with _token_lock:
+        UX.fallback = token
+    upstox.GOVERNOR.reset()
+    with _cache_lock:
+        _cache.clear()
+    _payload.update({"t": 0.0, "data": None})
+    return {"ok": True, "configured": True, "kind": "analytics", "expiresInSec": left, "expiresLabel": _expires_label(left),
+            "userName": "Analytics token (read-only, long-lived)", "feed": _feed_probe(), "publicUrl": _ngrok_url(),
+            "message": "Analytics token saved as the automatic fallback. The daily token (if any) stays the primary; this one takes over whenever it expires."}
+
+
 def apply_access_token(raw):
     """Validate with Upstox, save to the gitignored .env, and swap the live client."""
     token = _extract_token(raw)
+    if _is_analytics(token):
+        return apply_analytics_token(token)
     probe = upstox.UpstoxClient(token)
     upstox.GOVERNOR.reset()
     try:
@@ -400,7 +441,7 @@ def apply_access_token(raw):
     desk_env.write_var("UPSTOX_ACCESS_TOKEN", token)
     with _token_lock:
         globals()["TOKEN"] = token
-        UX.token = token
+        UX.set_primary(token)
         with _cache_lock:
             _cache.clear()
         _payload.update({"t": 0.0, "data": None})
@@ -611,7 +652,7 @@ def _fut_candles(key):
                     BASE3_INTRADAY.format(k=urllib.parse.quote(key, safe=""))):
             try:
                 req = urllib.request.Request(url, headers={
-                    "Authorization": "Bearer " + UX.token, "Accept": "application/json", "User-Agent": upstox._UA})
+                    "Authorization": "Bearer " + (UX.active_token() or ""), "Accept": "application/json", "User-Agent": upstox._UA})
                 with urllib.request.urlopen(req, timeout=25) as resp:
                     data = json.loads(resp.read().decode("utf-8")).get("data") or {}
             except Exception:

@@ -36,6 +36,7 @@ class CallGovernor:
         self.stamps = collections.deque()          # (time, endpoint)
         self.cool_until = 0.0
         self.cool_step = 30.0
+        self.auth_until = {}                       # token fingerprint -> time until which that token is not tried again (expired / invalid)
         self.counts = collections.Counter()
         self.blocked = 0
         self.limited = 0                           # 429s received
@@ -47,9 +48,21 @@ class CallGovernor:
         path = urllib.parse.urlparse(url).path
         return "/".join(path.split("/")[2:5]) or path
 
-    def acquire(self, url):
+    @staticmethod
+    def fingerprint(token):
+        import hashlib
+        return hashlib.sha1((token or "").encode("utf-8")).hexdigest()[:10]
+
+    def token_blocked(self, token):
+        with self.lock:
+            return time.time() < self.auth_until.get(self.fingerprint(token), 0.0)
+
+    def acquire(self, url, token=None):
         now = time.time()
         with self.lock:
+            if token and now < self.auth_until.get(self.fingerprint(token), 0.0):
+                self.blocked += 1
+                raise UpstoxError("Upstox call skipped: this access token was rejected (expired or invalid) - waiting before trying it again")
             if now < self.cool_until:
                 self.blocked += 1
                 raise UpstoxError("Upstox call skipped: cooling down after a rate-limit response (%ds left)" % int(self.cool_until - now))
@@ -63,14 +76,15 @@ class CallGovernor:
             self.stamps.append((now, ep))
             self.counts[ep] += 1
 
-    def auth_failed(self):
-        """HTTP 401: the token is expired / invalid. Stop asking for a while (no point hammering Upstox) - a newly saved token calls reset()."""
+    def auth_failed(self, token):
+        """HTTP 401 'invalid token': stop trying THAT token for a while (the other token keeps working). A newly saved token calls reset()."""
         with self.lock:
-            self.cool_until = max(self.cool_until, time.time() + 120.0)
+            self.auth_until[self.fingerprint(token)] = time.time() + 120.0
 
     def reset(self):
         with self.lock:
             self.cool_until, self.cool_step = 0.0, 30.0
+            self.auth_until.clear()
 
     def rate_limited(self, retry_after=None):
         with self.lock:
@@ -95,7 +109,7 @@ class CallGovernor:
                     d[0] += 1
             return {"lastMinute": sum(v[0] for v in per.values()), "last30Minutes": len(self.stamps), "byEndpoint": {k: {"lastMinute": v[0], "last30Minutes": v[1]} for k, v in per.items()},
                     "totalSinceStart": sum(self.counts.values()), "skippedByBudget": self.blocked, "rateLimitResponses": self.limited,
-                    "coolingDownSeconds": max(0, int(self.cool_until - now)), "budget": {"perMinute": self.max_min, "per30Minutes": self.max_30}}
+                    "coolingDownSeconds": max(0, int(self.cool_until - now)), "tokensPaused": sum(1 for t in self.auth_until.values() if t > now), "budget": {"perMinute": self.max_min, "per30Minutes": self.max_30}}
 
 
 GOVERNOR = CallGovernor()
@@ -148,20 +162,53 @@ def exchange_code(code, redirect_uri, key, secret):
     return token
 
 
+def _invalid_token(body):
+    """True when Upstox says the TOKEN is the problem (expired / invalid), not that this endpoint is restricted for it."""
+    b = body or ""
+    return "UDAPI100050" in b or "Invalid token" in b or "token has expired" in b.lower() or "UDAPI100011" in b
+
+
 class UpstoxClient:
-    def __init__(self, token):
+    """token = the normal daily access token; fallback = a long-lived read-only Analytics token used automatically whenever the daily token is
+    expired or rejected (401), and for as long as the daily token stays that way. Saving a new daily token switches back to it."""
+
+    def __init__(self, token, fallback=None):
         self.token = token
+        self.fallback = fallback
+        self.using_fallback = False
+        self.switches = 0
+
+    def set_primary(self, token):
+        self.token = token
+        self.using_fallback = False
+
+    def _usable(self, tok):
+        if not tok:
+            return False
+        left = token_seconds_left(tok)
+        return not (left is not None and left <= 0)
+
+    def active_token(self):
+        """The token the next call uses: the daily token while it is valid, otherwise the Analytics token."""
+        if self.fallback and (self.using_fallback or not self._usable(self.token) or GOVERNOR.token_blocked(self.token)):
+            if self._usable(self.fallback) and not GOVERNOR.token_blocked(self.fallback):
+                if not self.using_fallback:
+                    self.using_fallback = True
+                    self.switches += 1
+                return self.fallback
+        return self.token
 
     def _get(self, url, timeout=25):
-        req = urllib.request.Request(url, headers={
-            "Authorization": "Bearer " + self.token,
-            "Accept": "application/json",
-            "User-Agent": _UA,
-        })
         data = None
-        for attempt in range(3):
+        for attempt in range(4):
+            tok = self.active_token()
+            req = urllib.request.Request(url, headers={
+                "Authorization": "Bearer " + (tok or ""),
+                "Accept": "application/json",
+                "User-Agent": _UA,
+            })
             # transient network blips (connection reset, 5xx) are retried; a 429 starts a cool-down instead of hammering the API
-            GOVERNOR.acquire(url)
+            GOVERNOR.acquire(url, tok)
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
@@ -169,8 +216,14 @@ class UpstoxClient:
                 break
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", "ignore")[:300]
-                if exc.code == 401:
-                    GOVERNOR.auth_failed()
+                if exc.code == 401 and _invalid_token(body):
+                    GOVERNOR.auth_failed(tok)
+                    if self.fallback and tok != self.fallback and self._usable(self.fallback):
+                        self.using_fallback = True               # daily token rejected: switch to the Analytics token and retry this call
+                        self.switches += 1
+                        continue
+                    raise UpstoxError(f"HTTP 401: {body}") from None
+                if exc.code == 401:                              # token fine, this endpoint is not permitted for it (e.g. profile on an Analytics token)
                     raise UpstoxError(f"HTTP 401: {body}") from None
                 if exc.code == 429:
                     GOVERNOR.rate_limited(exc.headers.get("Retry-After"))
