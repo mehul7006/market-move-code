@@ -20,6 +20,87 @@ class UpstoxError(RuntimeError):
     pass
 
 
+class CallGovernor:
+    """Keeps the app far below Upstox's request limits (standard plan: 50/second, 500/minute, 2000 per 30 minutes).
+
+    * a local budget (default 300 a minute, 1,500 per 30 minutes - override with UPSTOX_MAX_PER_MIN / UPSTOX_MAX_PER_30MIN): when it is used up the call is
+      not sent; the app keeps showing its last good data (see server.cached) and tries again when the window frees up;
+    * a 429 from Upstox starts a cool-down (its Retry-After, at least 30 s, doubling on repeats up to 5 min) during which no call is sent;
+    * usage counters per endpoint (see /api/upstox-usage).
+    """
+
+    def __init__(self):
+        import collections
+        import threading
+        self.lock = threading.Lock()
+        self.stamps = collections.deque()          # (time, endpoint)
+        self.cool_until = 0.0
+        self.cool_step = 30.0
+        self.counts = collections.Counter()
+        self.blocked = 0
+        self.limited = 0                           # 429s received
+        self.max_min = int(os.environ.get("UPSTOX_MAX_PER_MIN", "300"))
+        self.max_30 = int(os.environ.get("UPSTOX_MAX_PER_30MIN", "1500"))
+
+    @staticmethod
+    def endpoint(url):
+        path = urllib.parse.urlparse(url).path
+        return "/".join(path.split("/")[2:5]) or path
+
+    def acquire(self, url):
+        now = time.time()
+        with self.lock:
+            if now < self.cool_until:
+                self.blocked += 1
+                raise UpstoxError("Upstox call skipped: cooling down after a rate-limit response (%ds left)" % int(self.cool_until - now))
+            while self.stamps and now - self.stamps[0][0] > 1800:
+                self.stamps.popleft()
+            last_min = sum(1 for t, _ in self.stamps if now - t <= 60)
+            if last_min >= self.max_min or len(self.stamps) >= self.max_30:
+                self.blocked += 1
+                raise UpstoxError("Upstox call skipped: local request budget used (%d in the last minute, %d in 30 minutes)" % (last_min, len(self.stamps)))
+            ep = self.endpoint(url)
+            self.stamps.append((now, ep))
+            self.counts[ep] += 1
+
+    def auth_failed(self):
+        """HTTP 401: the token is expired / invalid. Stop asking for a while (no point hammering Upstox) - a newly saved token calls reset()."""
+        with self.lock:
+            self.cool_until = max(self.cool_until, time.time() + 120.0)
+
+    def reset(self):
+        with self.lock:
+            self.cool_until, self.cool_step = 0.0, 30.0
+
+    def rate_limited(self, retry_after=None):
+        with self.lock:
+            self.limited += 1
+            wait = max(float(retry_after or 0), self.cool_step)
+            self.cool_until = time.time() + wait
+            self.cool_step = min(self.cool_step * 2, 300.0)
+
+    def ok(self):
+        with self.lock:
+            if time.time() > self.cool_until:
+                self.cool_step = 30.0
+
+    def usage(self):
+        now = time.time()
+        with self.lock:
+            per = {}
+            for t, ep in self.stamps:
+                d = per.setdefault(ep, [0, 0])
+                d[1] += 1
+                if now - t <= 60:
+                    d[0] += 1
+            return {"lastMinute": sum(v[0] for v in per.values()), "last30Minutes": len(self.stamps), "byEndpoint": {k: {"lastMinute": v[0], "last30Minutes": v[1]} for k, v in per.items()},
+                    "totalSinceStart": sum(self.counts.values()), "skippedByBudget": self.blocked, "rateLimitResponses": self.limited,
+                    "coolingDownSeconds": max(0, int(self.cool_until - now)), "budget": {"perMinute": self.max_min, "per30Minutes": self.max_30}}
+
+
+GOVERNOR = CallGovernor()
+
+
 def load_env(path):
     env = {}
     if os.path.exists(path):
@@ -79,14 +160,22 @@ class UpstoxClient:
         })
         data = None
         for attempt in range(3):
-            # transient network blips (connection reset, 429, 5xx) are retried; real API errors are not
+            # transient network blips (connection reset, 5xx) are retried; a 429 starts a cool-down instead of hammering the API
+            GOVERNOR.acquire(url)
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
+                GOVERNOR.ok()
                 break
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", "ignore")[:300]
-                if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                if exc.code == 401:
+                    GOVERNOR.auth_failed()
+                    raise UpstoxError(f"HTTP 401: {body}") from None
+                if exc.code == 429:
+                    GOVERNOR.rate_limited(exc.headers.get("Retry-After"))
+                    raise UpstoxError(f"HTTP 429: rate limit - pausing Upstox calls: {body}") from None
+                if exc.code in (500, 502, 503, 504) and attempt < 2:
                     time.sleep(0.4 * (attempt + 1))
                     continue
                 raise UpstoxError(f"HTTP {exc.code}: {body}") from None

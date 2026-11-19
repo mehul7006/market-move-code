@@ -170,13 +170,38 @@ _payload = {"t": 0.0, "data": None}
 _lock = threading.Lock()
 
 
+# How long data is reused before Upstox is asked again (seconds). Live touches do not need fast candle calls: the latest traded price is folded into the
+# forming 1-minute candle (see _inject_ltp), so quotes stay fast and everything else is slow. Override with environment variables if needed.
+def _envf(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return float(default)
+
+
+TRADED_IDS = ("NIFTY", "BANKNIFTY", "SENSEX")
+QUOTE_TTL = _envf("UPSTOX_TTL_QUOTES", 5)               # one batched call for every index
+INTRA1M_TTL = _envf("UPSTOX_TTL_INTRA1M", 20)           # 1-minute candles of the three traded indexes
+INTRA5M_TTL = _envf("UPSTOX_TTL_INTRA5M", 30)           # 5-minute candles of the traded indexes
+INTRA5M_CONTEXT_TTL = _envf("UPSTOX_TTL_INTRA5M_CONTEXT", 180)   # sector / other indexes (chart context only)
+CHAIN_TTL = _envf("UPSTOX_TTL_CHAIN", 30)               # option chain (OI, greeks)
+FUT_TTL = _envf("UPSTOX_TTL_FUT", 30)                   # futures volume / OI
+REFRESH_OPEN_SEC = _envf("UPSTOX_REFRESH_OPEN", 6)      # background refresh while the market is open
+REFRESH_CLOSED_SEC = _envf("UPSTOX_REFRESH_CLOSED", 30)   # and when it is closed
+
+
 def cached(name, ttl, fn):
     now = time.time()
     with _cache_lock:
         hit = _cache.get(name)
         if hit and now - hit[0] < ttl:
             return hit[1]
-    value = fn()
+    try:
+        value = fn()
+    except Exception:
+        if hit:                       # the call failed or was held back (rate limit / budget): keep showing the last good data
+            return hit[1]
+        raise
     with _cache_lock:
         _cache[name] = (time.time(), value)
     return value
@@ -266,6 +291,17 @@ def _sync_token_from_env():
         globals()["TOKEN"] = tok
 
 
+def friendly_feed_error(err):
+    """One calm sentence instead of Upstox's raw JSON when the token is the problem."""
+    t = str(err or "")
+    if "401" in t or "UDAPI100050" in t or "Invalid token" in t or "expired" in t.lower():
+        return ("Upstox access token expired or invalid - open Access and paste a fresh token (or a 1-year read-only Analytics token). "
+                "The last data stays on screen meanwhile.")
+    if "rate limit" in t.lower() or "cooling down" in t or "budget" in t:
+        return "Upstox calls are paused for a moment to stay under its rate limit - the last data stays on screen."
+    return t[:200]
+
+
 def _expires_label(seconds):
     if seconds is None:
         return None
@@ -277,7 +313,7 @@ def _expires_label(seconds):
 def _feed_probe():
     """One cheap real quote, so the Access panel can prove the new token fetches data."""
     try:
-        q = cached("quotes", 2.5, lambda: UX.quotes([i["key"] for i in INSTRUMENTS]))
+        q = cached("quotes", QUOTE_TTL, lambda: UX.quotes([i["key"] for i in INSTRUMENTS]))
         nifty = q.get("NSE_INDEX|Nifty 50") or {}
         return {"online": True, "nifty": nifty.get("last"), "error": None}
     except Exception as exc:
@@ -348,7 +384,16 @@ def apply_access_token(raw):
     """Validate with Upstox, save to the gitignored .env, and swap the live client."""
     token = _extract_token(raw)
     probe = upstox.UpstoxClient(token)
-    prof = probe.profile()
+    upstox.GOVERNOR.reset()
+    try:
+        prof = probe.profile()
+    except upstox.UpstoxError as exc:
+        # Upstox's 1-year read-only "Analytics" token cannot read the user profile - accept it when it can read market data
+        try:
+            probe.quotes([INSTRUMENTS[0]["key"]])
+            prof = {"user_name": "read-only market-data token (long-lived)"}
+        except upstox.UpstoxError:
+            raise exc
     left = upstox.token_seconds_left(token)
     if left is not None and left <= 0:
         raise ValueError("that token is already expired; generate a fresh one")
@@ -493,7 +538,7 @@ def _hist_1m(inst):
         except Exception:
             pass
     try:
-        for c in cached(f"intra1m:{inst['id']}", 3, lambda: UX.intraday(inst["key"], "minutes", 1)):
+        for c in cached(f"intra1m:{inst['id']}", INTRA1M_TTL, lambda: UX.intraday(inst["key"], "minutes", 1)):
             store["rows"][c["t"]] = c
     except Exception:
         pass
@@ -578,7 +623,7 @@ def _fut_candles(key):
                 except Exception:
                     continue
         return [(t,) + out[t] for t in sorted(out)]
-    return cached(f"futc:{key}", 20, fetch)
+    return cached(f"futc:{key}", FUT_TTL, fetch)
 
 
 BASE3_INTRADAY = "https://api.upstox.com/v3/historical-candle/intraday/{k}/minutes/5"
@@ -991,7 +1036,7 @@ def _intraday(inst):
         # tag-based count keeps the provenance label after the filled bars are cached
         yahoo_fill = sum(1 for c in rows[-150:] if c.get("src") == "YAHOO")
         return {"rows": rows, "yahooFill": yahoo_fill}
-    return cached(f"intra:{inst['id']}", 8, fetch)
+    return cached(f"intra:{inst['id']}", INTRA5M_TTL if inst["id"] in TRADED_IDS else INTRA5M_CONTEXT_TTL, fetch)
 
 
 def _daily(inst):
@@ -1341,7 +1386,7 @@ def _expiries(chain_key):
 
 
 def _chain(chain_key, expiry):
-    return cached(f"chain:{chain_key}:{expiry}", 15,
+    return cached(f"chain:{chain_key}:{expiry}", CHAIN_TTL,
                   lambda: UX.chain_as_records(chain_key, expiry))
 
 
@@ -1403,7 +1448,7 @@ def _build_one(inst, quotes, quote_error):
             if not options:
                 opt_error = "option chain returned no usable rows"
         except Exception as exc:
-            opt_src, opt_error = "ERROR", f"Upstox options: {exc}"
+            opt_src, opt_error = "ERROR", f"Upstox options: {friendly_feed_error(exc)}"
 
     signal = None
     if candles and spot and len(candles) >= 40:
@@ -1431,7 +1476,7 @@ def _build_one(inst, quotes, quote_error):
             "quote": "UPSTOX" if (quotes and inst["key"] in quotes) else ("YAHOO" if q else "ERROR"),
             "candles": candle_src, "options": opt_src,
         },
-        "error": "; ".join(errors) if errors else (quote_error and f"quote: {quote_error}" or None),
+        "error": friendly_feed_error("; ".join(errors)) if errors else (quote_error and f"quote: {friendly_feed_error(quote_error)}" or None),
         "optionsError": opt_error,
         "candles": candles,
         "options": options,
@@ -1561,7 +1606,7 @@ def _background_refresher():
         except Exception:
             pass
         dur = time.time() - t0
-        floor = 3 if market_open() else 30
+        floor = REFRESH_OPEN_SEC if market_open() else REFRESH_CLOSED_SEC
         _cycle["sec"] = max(floor, 2 * dur) if LITE else floor
         time.sleep(_cycle["sec"] if LITE else floor)
 
@@ -1587,7 +1632,7 @@ def build_market(force=False):
         token_left = upstox.token_seconds_left(TOKEN)
         notes = []
         if not upstox_ok:
-            notes.append(f"UPSTOX FEED DOWN: {quote_error[:200]}. Charts fall back to Yahoo real data; "
+            notes.append(f"UPSTOX FEED DOWN: {friendly_feed_error(quote_error)}. Charts fall back to Yahoo real data; "
                          "option/OI panels are disabled. Open Access and paste a fresh token, or run "
                          "python upstox_login.py.")
         elif token_left is not None and token_left < 1800:
@@ -2055,6 +2100,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return
 
+        if parsed.path == "/api/upstox-usage":
+            body = json.dumps(upstox.GOVERNOR.usage()).encode("utf-8")
+            return self._send(200, body, "application/json; charset=utf-8")
         if parsed.path == "/api/recorder":
             try:
                 import optrecorder

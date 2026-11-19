@@ -595,3 +595,23 @@ reach 62% wins with a positive net in every block. All three indexes on the repl
   and the 09:40 filter skipped. Tested also for Bank Nifty (win rate fell) and Sensex (net fell). Entries until 15:00 and a separate afternoon cut-off were
   tested and did not help.
 - 120-day replay, sure calls: 255 calls, 62.7% wins, +36.8 per call, +9,376 points (Nifty 72.1% / +16.1, Bank Nifty 58.5% / +11.1, Sensex 62.7% / +64.7).
+
+## Upstox request budget (rate limits)
+Upstox's standard limits are 50 requests/second, 500/minute and 2,000 per 30 minutes. The app used to ask for about 220 calls a minute while the market was open
+(5-minute candles of all 16 instruments every ~9 s, 1-minute candles every 3 s, ...), which could trip the 30-minute limit. Now:
+- `upstox.CallGovernor` keeps a local budget (300/minute and 1,500 per 30 minutes; `UPSTOX_MAX_PER_MIN`, `UPSTOX_MAX_PER_30MIN`). When it is used up the call is not sent and the
+  page keeps showing the last good data (`server.cached` falls back to the previous value on any failure).
+- A 429 from Upstox starts a cool-down (its Retry-After, at least 30 s, doubling up to 5 min) with no calls in between, instead of retrying immediately.
+- Data is reused longer: quotes 5 s, traded indexes' 1-minute candles 20 s and 5-minute candles 30 s, other indexes 180 s, option chain and futures 30 s; the
+  background refresh runs every 6 s while the market is open and every 30 s when it is closed (`UPSTOX_TTL_*`, `UPSTOX_REFRESH_*` to change). Live stop / target touches
+  still use the latest traded price from the 5-second quote, so they are not delayed.
+- Estimated load while open: ~220 -> ~50 calls a minute (about 1,500 per 30 minutes). `/api/upstox-usage` shows the real counts per endpoint.
+The access token itself still expires every night (about 03:30 IST) - that is Upstox's rule and does not depend on the number of calls.
+
+## Render: avoid pasting the Upstox token again and again
+An ordinary Upstox access token dies every night (~03:30 IST) and Render's free disk is wiped whenever the service sleeps, so a pasted token is forgotten. The fix that needs
+no code change on Render: generate Upstox's **Analytics token** (Developer Apps -> your app -> Analytics tab; read-only, valid 1 year, market + historical data) and put it in the Render
+environment variable **UPSTOX_ACCESS_TOKEN** once. The app accepts it (it validates it with a market-data call, because this token cannot read the user profile), it survives
+sleeping and redeploys, and a newer token in the environment always beats an older saved one. When the token is expired or invalid the page now shows ONE calm sentence
+("Upstox access token expired or invalid - open Access and paste a fresh token ...") instead of raw errors, keeps showing the last data, and stops calling Upstox for 2 minutes
+at a time instead of hammering it; saving a new token clears that pause immediately.
