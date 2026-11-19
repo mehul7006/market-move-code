@@ -99,6 +99,8 @@ STRATEGIES = {
 }
 assert all(TARGET_X[k] >= 0.9 * TARGET_SL[k] - 1e-9 for k in TARGET_X), "short-term T1 must be at least 90% of the stop"
 _PENDING = {}   # (segment, candle minutes) -> calls waiting for their confirmation move right now
+_PENDING60 = {}  # the same for 60%+ confidence calls
+_PICKS60 = {}    # (segment, candle minutes) -> 60%+ confidence (not sure) calls, from strict.LAST_CONF60
 _PICKS = {}   # (segment, candle minutes) -> {candle open time: (side, score, family)}, set by prepare_strict()
 
 
@@ -106,7 +108,10 @@ def prepare_strict(candles_by_tf, now, days=200):
     """Choose the calls for every index (all candle sizes together) before any replay()."""
     _PICKS.clear()
     _PENDING.clear()
+    _PENDING60.clear()
     _PICKS.update(_strict.prepare(candles_by_tf, now, days=days))
+    _PICKS60.clear()
+    _PICKS60.update(_strict.LAST_CONF60)
 
 
 # what testing found where a pair has no strategy (shown to the user instead of an invented call)
@@ -407,7 +412,7 @@ def _trade(cs, i, sign, p, fine=None, fine_t=None, now=None, fill=None):
                 -sl if bucket == "SL" else {1: t1, 2: t2, 3: t3}.get(maxhit, last)), 2)}
 
 
-def _replay_one(cs, p, since_ts=None, fine=None, now=None, until_ts=None, picks=None):
+def _replay_one(cs, p, since_ts=None, fine=None, now=None, until_ts=None, picks=None, pending_sink=None):
     """Every call strategy `p` would have issued on `cs` (completed candles of p['tf'] minutes).
     `fine` = real 1-minute candles used to decide which level came first."""
     tf = p["tf"]
@@ -440,7 +445,7 @@ def _replay_one(cs, p, since_ts=None, fine=None, now=None, until_ts=None, picks=
         if p.get("confirm"):
             how, a1, a2 = _confirm_fill(cs, i, s, p, fine, now)
             if how == "pending":
-                _PENDING.setdefault((p["seg"], tf), []).append({
+                (pending_sink if pending_sink is not None else _PENDING).setdefault((p["seg"], tf), []).append({
                     "segment": p["seg"], "tf": tf, "name": p["name"], "t": cs[i]["t"], "side": "BUY" if s > 0 else "SELL",
                     "signalClose": _round(cs[i]["close"]), "trigger": _round(a1), "until": a2, "sl": _round(a1 - s * p["sl"]),
                     "t1": _round(a1 + s * p["t1"]), "t2": _round(a1 + s * p["t2"]), "t3": _round(a1 + s * p["t3"]),
@@ -476,7 +481,7 @@ def _replay_one(cs, p, since_ts=None, fine=None, now=None, until_ts=None, picks=
             "planExitAt": pr["exitAt"], "planReason": pr["reason"], "planExitAfter": pr["exitAfter"],
             "planAlive": pr["alive"],
             "exit": tr["exit"], "mfe": tr["mfe"], "planPts": pr["pts"], "t1ExitPts": tr["t1Pts"],
-            "live": tr["live"], "id": "%s-%s-%s%s" % (p["seg"], tf, cs[i]["t"], "-b" if p.get("isAlt") else ""), "family": (pk[2] if pk else p["family"]), "score": (pk[1] if pk else None), "grade": (pk[3] if pk else "A"),
+            "live": tr["live"], "id": "%s-%s-%s%s" % (p["seg"], tf, cs[i]["t"], "-b" if p.get("isAlt") else ""), "family": (pk[2] if pk else p["family"]), "score": (pk[1] if pk else None), "grade": (pk[3] if pk else "A"), "prob": (pk[4] if pk and len(pk) > 4 else None), "why": (pk[5] if pk and len(pk) > 5 else None),
             "preRun": _round((e - cs[i - lookback]["close"]) * s, 1),
             "patterns": sorted(set(mine)),
         })
@@ -627,6 +632,7 @@ def build(candles_by_tf, days=60, now=None, futures=None):
     futures = futures or {}
     prepare_strict(candles_by_tf, now)
     blocks = {}
+    conf60_calls = []
     for tf in TIMEFRAMES:
         segments, all_calls, active = [], [], []
         for seg, label in SEGMENTS.items():
@@ -672,6 +678,13 @@ def build(candles_by_tf, days=60, now=None, futures=None):
                        lastSession=summarize([r for r in recent if r["date"] == last_day]),
                        lastSessionDate=last_day)
             all_calls.extend(recent)
+            # 60%+ confidence calls of the last 5 sessions: shown on their own page, never counted in the results
+            if _PICKS60.get((seg, tf)):
+                since60 = cs[-1]["t"] - 7 * 86400
+                c60 = _replay_one(cs, p, since_ts=since60, fine=fine, now=now, picks=_PICKS60.get((seg, tf)), pending_sink=_PENDING60)
+                for c in c60:
+                    c["tier"] = "60"
+                conf60_calls.extend(c60)
         all_calls.sort(key=lambda r: (r["t"], r["segment"]), reverse=True)
         blocks[str(tf)] = {"tf": tf, "segments": segments, "totals": summarize(all_calls), "calls": all_calls,
                            "active": [r for r in all_calls if r["result"] == "OPEN"]}
@@ -686,6 +699,8 @@ def build(candles_by_tf, days=60, now=None, futures=None):
     ist = time.gmtime(now + 19800)
     return {
         "pending": [x for v in _PENDING.values() for x in v],
+        "pending60": [x for v in _PENDING60.values() for x in v],
+        "conf60": sorted(conf60_calls, key=lambda r: r["t"], reverse=True),
         "generatedAt": int(now), "istClock": time.strftime("%Y-%m-%d %H:%M:%S", ist), "days": days,
         "target": {"winRate": 70}, "timeframes": blocks,
         "noEdge": [{"id": k, "name": v} for k, v in NO_EDGE.items()],

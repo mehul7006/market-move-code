@@ -58,46 +58,39 @@ def _row(term, seg, name, candle, side, entry_at, entry, sl, t1, t2, t3, touched
     return r
 
 
-def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, now, market_open):
-    session = today_payload.get("day")
+def _short_rows(calls, session, now, ltps):
     rows = []
-
-    # ------------------------------------------------------------------ short term (already tracked live)
-    # Levels, touch times and status follow the TARGET profile (T1 = SL = T1 / stop: Nifty 22.5/25, Bank Nifty 63/70, Sensex 81/90, T2 = 2x, T3 = 3x).
-    for c in short_payload["timeframes"]["all"]["calls"]:
+    for c in calls:
         if c["date"] != session:
             continue
         v = (c.get("variants") or {}).get("tgt")
         p = shortterm.STRATEGIES.get((c["segment"], c["tf"])) or {}
         day_start = c["t"] - ((c["t"] + 19800) % 86400)
         wend = min(c["entryAt"] + p.get("horizonMin", 120) * 60, day_start + shortterm.SESSION_CLOSE_MIN * 60)
-        if v:
-            touched = {k: v[k + "At"] for k in ("t1", "t2", "t3") if v.get(k + "At")}
-            if v.get("slAt"):
-                touched["sl"] = v["slAt"]
-            if v["alive"]:
-                status = "RUNNING"
-            elif v["kind"] == "SL":
-                status = "SL"
-            elif v["best"]:
-                status = "T%d" % v["best"]
-            else:
-                status = "TIMEOUT"
-            rows.append(_row("short", c["segment"], c["name"], "%sm" % c["tf"], c["side"], c["entryAt"], c["entry"],
-                             v["sl"], v["t1"], v["t2"], v["t3"], touched, status, wend, now,
-                             (ltps.get(c["segment"]) or {}).get("last"), c.get("scoredOn"),
-                             {"patterns": c.get("patterns") or [], "id": c["id"], "profile": "tgt", "family": c.get("family"), "grade": c.get("grade", "A"),
-                              "pts": v["pts"], "exitAt": v["exitAt"], "kind": v["kind"]}))
+        if not v:
             continue
-        touched = {k: c[k + "At"] for k in ("sl", "t1", "t2", "t3") if c.get(k + "At")}
-        status = "RUNNING" if (c["result"] == "OPEN" or c.get("planAlive")) else c["result"]
+        touched = {k: v[k + "At"] for k in ("t1", "t2", "t3") if v.get(k + "At")}
+        if v.get("slAt"):
+            touched["sl"] = v["slAt"]
+        if v["alive"]:
+            status = "RUNNING"
+        elif v["kind"] == "SL":
+            status = "SL"
+        elif v["best"]:
+            status = "T%d" % v["best"]
+        else:
+            status = "TIMEOUT"
         rows.append(_row("short", c["segment"], c["name"], "%sm" % c["tf"], c["side"], c["entryAt"], c["entry"],
-                         c["sl"], c["t1"], c["t2"], c["t3"], touched, status, wend, now,
+                         v["sl"], v["t1"], v["t2"], v["t3"], touched, status, wend, now,
                          (ltps.get(c["segment"]) or {}).get("last"), c.get("scoredOn"),
-                         {"patterns": c.get("patterns") or [], "id": c["id"]}))
+                         {"patterns": c.get("patterns") or [], "id": c["id"], "profile": "tgt", "family": c.get("family"), "grade": c.get("grade", "A"),
+                          "pts": v["pts"], "exitAt": v["exitAt"], "kind": v["kind"], "prob": c.get("prob"), "why": c.get("why")}))
+    return rows
 
-    # short-term calls waiting for their confirmation move (entered only if price trades the trigger in time)
-    for c in short_payload.get("pending") or []:
+
+def _pending_rows(items, session, now, ltps):
+    rows = []
+    for c in items or []:
         if datetime.datetime.fromtimestamp(c["t"] + 19800, datetime.timezone.utc).strftime("%Y-%m-%d") != session:
             continue
         rows.append(_row("short", c["segment"], c["name"], "%sm" % c["tf"], c["side"], c["t"] + c["tf"] * 60, c["trigger"],
@@ -105,6 +98,18 @@ def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, no
                          (ltps.get(c["segment"]) or {}).get("last"), "1m",
                          {"id": c["id"], "pending": True, "trigger": c["trigger"], "until": c["until"], "signalClose": c["signalClose"],
                           "family": c.get("family"), "grade": "A"}))
+    return rows
+
+
+def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, now, market_open):
+    session = today_payload.get("day")
+    rows = []
+
+    # ------------------------------------------------------------------ short term: SURE calls only (these are the ones counted)
+    rows += _short_rows(short_payload["timeframes"]["all"]["calls"], session, now, ltps)
+
+    # short-term sure calls waiting for their confirmation move (entered only if price trades the trigger in time)
+    rows += _pending_rows(short_payload.get("pending"), session, now, ltps)
 
     # ------------------------------------------------------------------ long term (scanned on the 1m path here)
     for c in today_payload.get("calls") or []:
@@ -145,9 +150,12 @@ def build(short_payload, today_payload, cmap1, ltps, profiles, profile_by_id, no
         "stopped": sum(1 for r in rows if r["status"] == "SL"),
         "timeout": sum(1 for r in rows if r["status"] == "TIMEOUT"),
     }
+    # 60%+ confidence calls (and same-moment duplicates on another index): shown on their own page, NOT counted anywhere
+    conf_rows = _short_rows(short_payload.get("conf60") or [], session, now, ltps) + _pending_rows(short_payload.get("pending60"), session, now, ltps)
+    conf_rows.sort(key=lambda r: (0 if r["running"] else 1, -r["generatedAt"]))
     return {
         "serverTime": now, "marketOpen": market_open, "sessionDate": session,
-        "isToday": bool(today_payload.get("isToday")), "ltp": ltps, "counts": cnt, "calls": rows,
+        "isToday": bool(today_payload.get("isToday")), "ltp": ltps, "counts": cnt, "calls": rows, "conf60": conf_rows,
         "istClock": datetime.datetime.fromtimestamp(now + 19800, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "notes": {
             "running": "RUNNING = the call's stop has not been touched and its window (1-2 hours, or 15:25 for long term) has not "

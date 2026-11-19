@@ -28,7 +28,12 @@ TFS = (1, 5)                                   # 15-minute calls lost money in t
 # B tier = a looser filter (strict_model.json "thrB") that adds ~0.5 calls per session. Out of sample it looked fine (Nifty 59%, Sensex 59.5% wins) but on the
 # 120-day replay the B calls won only 49.5% (+9 per call) and pulled the totals down, so it is OFF by default. Set STRICT_B_TIER=1 to turn it on.
 USE_B_TIER = os.environ.get("STRICT_B_TIER", "0").strip() in ("1", "true", "yes")
-CROSS_DEDUPE_MIN = 0                            # set to 5 to merge: the same side called on several indices within this many minutes counts as ONE call (best score kept); 0 = off
+CROSS_DEDUPE_MIN = 5                            # the same side called on several indices within this many minutes counts as ONE sure call (best score kept);
+                                                # the others are shown on the 60%+ confidence page. 0 = off
+CONF60_MIN = 0.60                               # "60%+ confidence" page: the extra calls of a looser cut-off, used only if they won >= 60% out of sample
+# Trend-day exception (tested on 120 days, kept only where both the win rate and the net rose): when the index has already moved a lot today in the
+# call's direction (day_move in its top share) and the higher timeframe agrees, the score cut-off is lowered and the quality filter is skipped.
+TREND = {"NIFTY": {"dm_q": 0.70, "lower": 0.10}, "BANKNIFTY": None, "SENSEX": None}   # Bank Nifty: lowered its win rate; Sensex: lowered its net - not used
 FAMILIES = ("vwapx", "pullback", "orb", "ema", "brk", "macd")
 MAX_PER_DAY = 5
 HORIZON_MIN = {1: 60, 5: 120}          # how long a call is followed
@@ -59,7 +64,31 @@ FILTERS = {
 }
 
 
+def is_trend(mdl, x):
+    t = (mdl or {}).get("trend")
+    if not t:
+        return False
+    return x["feat"][FEATURE_NAMES.index("day_move")] >= t["dmCut"] and x["feat"][FEATURE_NAMES.index("htf_align")] > 0
+
+
+def threshold(mdl, x):
+    if is_trend(mdl, x):
+        return mdl["trend"]["thr"]
+    return mdl.get("thrB", mdl["thr"]) if USE_B_TIER else mdl["thr"]
+
+
+def prob(mdl, sc):
+    """Historical rate of 'T1 before the stop' for signals scoring about this much (calibration table in strict_model.json)."""
+    best = None
+    for lo, wr in (mdl or {}).get("calib") or []:
+        if sc >= lo:
+            best = wr
+    return best
+
+
 def passes(mdl, x):
+    if is_trend(mdl, x):
+        return True
     f = (mdl or {}).get("filter")
     if not f:
         return True
@@ -271,9 +300,9 @@ def select(cands, mdl, max_per_day=MAX_PER_DAY):
     for x in sorted(cands, key=lambda c: (c["done"], -c.get("score", 0.0))):
         if x["done"] < blocked:                         # another call of this index is still open
             continue
-        if x["score"] < (mdl.get("thrB", mdl["thr"]) if USE_B_TIER else mdl["thr"]):   # B tier: a looser filter that adds a few lower-confidence calls
+        if x["score"] < threshold(mdl, x):              # trend days use a lower cut-off; B tier (off by default) a looser one
             continue
-        x["grade"] = "A" if x["score"] >= mdl["thr"] else "B"
+        x["grade"] = "A" if (x["score"] >= mdl["thr"] or is_trend(mdl, x)) else "B"
         d = _day(x["t"])
         if per[d] >= max_per_day:
             continue
@@ -303,12 +332,13 @@ def cross_dedupe(chosen, window_min=None):
 
 # ---------------------------------------------------------------------------------------------------- live use
 _CACHE = {}
+LAST_CONF60 = {}   # (segment, tf) -> {candle time: (side, score, family, "C", probability, reason)} from the last prepare()
 
 
 def prepare(candles_by_tf, now, days=120):
     """Compute the selected calls for every index. Returns {(segment, tf): {candle_time: (side, score, family)}}.
     Finished days are cached; today is recomputed on every call."""
-    out, chosen = {}, []
+    out, chosen, conf60 = {}, [], []
     mdls = model()
     today0 = int(now - ((now + 19800) % 86400))
     first = today0 - days * 86400
@@ -340,11 +370,41 @@ def prepare(candles_by_tf, now, days=120):
                 if x["t"] >= first and allowed(seg, x):
                     x["score"] = score(mdl, x["feat"])
                     allc.append(x)
+        sure_ids = set()
         for x in select(allc, mdl):
             if not passes(mdl, x):
                 continue
-            x["margin"] = x["score"] - mdl["thr"]
+            x["margin"] = x["score"] - threshold(mdl, x)
             chosen.append((seg, x))
-    for seg, x in cross_dedupe(chosen):
+            sure_ids.add((x["tf"], x["t"]))
+        # 60%+ confidence: every other signal whose historical win rate at its score is >= CONF60_MIN (own one-at-a-time / per-day rule)
+        rest = []
+        c60 = mdl.get("conf60")
+        if mdl.get("thr60") is not None and c60:
+            for x in allc:
+                if (x["tf"], x["t"]) in sure_ids or x["score"] < mdl["thr60"]:
+                    continue
+                rest.append(dict(x, prob=c60["winRate"] / 100.0, why=_why_not_sure(mdl, x)))
+        for x in select(rest, dict(mdl, thr=-1e9, trend=None)):
+            conf60.append((seg, x))
+    kept = cross_dedupe(chosen)
+    kept_ids = {(s, x["tf"], x["t"]) for s, x in kept}
+    for seg, x in chosen:
+        if (seg, x["tf"], x["t"]) not in kept_ids:          # same move called on another index at the same moment: counted once
+            mate = next((s for s, y in kept if y["side"] == x["side"] and abs(y["done"] - x["done"]) <= CROSS_DEDUPE_MIN * 60), None)
+            m_ = model().get(seg) or {}
+            conf60.append((seg, dict(x, prob=((m_.get("outOfSample") or {}).get("winRate") or 0) / 100.0, why="same move already called on %s" % (mate or "another index"))))
+    for seg, x in kept:
         out.setdefault((seg, x["tf"]), {})[x["t"]] = (x["side"], round(x["score"], 3), x["fam"], x.get("grade", "A"))
+    LAST_CONF60.clear()
+    for seg, x in conf60:
+        LAST_CONF60.setdefault((seg, x["tf"]), {})[x["t"]] = (x["side"], round(x["score"], 3), x["fam"], "C", round(x.get("prob") or 0, 3), x.get("why", ""))
     return out
+
+
+def _why_not_sure(mdl, x):
+    if x["score"] < threshold(mdl, x):
+        return "score below the sure-call cut-off"
+    if not passes(mdl, x):
+        return "quality filter (%s)" % ((mdl.get("filter") or {}).get("feature") or "")
+    return "another call of this index was open"

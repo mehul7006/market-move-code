@@ -1,11 +1,12 @@
-STRICT MODEL TRAINING - real Upstox candles - 2026-11-19 22:43 IST
+STRICT MODEL TRAINING - real Upstox candles - 2026-11-19 23:11 IST
 
 == NIFTY: 14004 signals with a full real 1-minute path, 2026-05-14 -> 2026-11-19; T1 = 22.5 points, stop = 25 points (model target: win)
-   test block 2026-08-21 -> 2026-09-20: 18 calls, win 72.2%, net   +8.0 pts per call
-   test block 2026-09-20 -> 2026-10-20: 13 calls, win 92.3%, net  +45.5 pts per call
-   test block 2026-10-20 -> 2026-11-19: 11 calls, win 54.5%, net  +13.1 pts per call
-   OUT-OF-SAMPLE (3 blocks x 30 days, trained only on earlier data): 42 calls = 0.7 per session, win 73.8%, NET +20.9 points per call
-      A-grade: 42 calls, win 73.8%, net +20.9   |   B-grade: 0 calls, win 0.0%, net +0.0
+   test block 2026-08-21 -> 2026-09-20: 19 calls, win 68.4%, net   +6.3 pts per call
+   test block 2026-09-20 -> 2026-10-20: 16 calls, win 93.8%, net  +41.2 pts per call
+   test block 2026-10-20 -> 2026-11-19: 12 calls, win 50.0%, net   +9.9 pts per call
+   OUT-OF-SAMPLE (3 blocks x 30 days, trained only on earlier data): 47 calls = 0.78 per session, win 72.3%, NET +19.1 points per call
+      A-grade: 47 calls, win 72.3%, net +19.1   |   B-grade: 0 calls, win 0.0%, net +0.0
+   60%+ confidence tier (extra calls a looser cut-off adds, out of sample): top 15%: 50 calls 44% wins -3.9, top 20%: 58 calls 48% wins -2.0, top 30%: 81 calls 54% wins +4.6, top 40%: 91 calls 52% wins +2.4, top 60%: 112 calls 52% wins +3.9  -> used: None
    strongest features: day_move +0.048, range_position -0.043, ema_slope +0.035, htf_align -0.016, hour -0.016
 
 == BANKNIFTY: 13870 signals with a full real 1-minute path, 2026-05-14 -> 2026-11-19; T1 = 63 points, stop = 70 points (model target: win)
@@ -14,6 +15,7 @@ STRICT MODEL TRAINING - real Upstox candles - 2026-11-19 22:43 IST
    test block 2026-10-20 -> 2026-11-19: 35 calls, win 74.3%, net  +33.7 pts per call
    OUT-OF-SAMPLE (3 blocks x 30 days, trained only on earlier data): 74 calls = 1.21 per session, win 70.3%, NET +35.7 points per call
       A-grade: 74 calls, win 70.3%, net +35.7   |   B-grade: 0 calls, win 0.0%, net +0.0
+   60%+ confidence tier (extra calls a looser cut-off adds, out of sample): top 8%: 52 calls 50% wins +7.4, top 10%: 71 calls 51% wins +7.1, top 15%: 111 calls 46% wins +0.7, top 20%: 143 calls 51% wins +6.0, top 30%: 195 calls 52% wins +4.9  -> used: None
    strongest features: ema_slope +0.030, htf_align -0.017, f_orb +0.017, pre_run +0.015, vwap_distance +0.010
 
 == SENSEX: 14926 signals with a full real 1-minute path, 2026-05-14 -> 2026-11-19; T1 = 81 points, stop = 90 points (model target: pnl)
@@ -22,8 +24,9 @@ STRICT MODEL TRAINING - real Upstox candles - 2026-11-19 22:43 IST
    test block 2026-10-20 -> 2026-11-19: 23 calls, win 78.3%, net  +78.7 pts per call
    OUT-OF-SAMPLE (3 blocks x 30 days, trained only on earlier data): 76 calls = 1.27 per session, win 72.4%, NET +59.0 points per call
       A-grade: 76 calls, win 72.4%, net +59.0   |   B-grade: 0 calls, win 0.0%, net +0.0
+   60%+ confidence tier (extra calls a looser cut-off adds, out of sample): top 60%: 89 calls 48% wins +18.0, top 80%: 106 calls 52% wins +17.8, top 90%: 113 calls 57% wins +20.8  -> used: None
    strongest features: range_position -0.136, day_move +0.126, ema_slope +0.104, hour +0.071, tf1 -0.032
 
 == ALL THREE INDEXES TOGETHER (out-of-sample)
-   each index separately: 192 calls, win 71.9%, net +41.7 pts per call, total +8007 pts
-   same side within 0 min on several indexes = ONE call: 192 calls, win 71.9%, net +41.7 pts per call, total +8007 pts
+   each index separately: 197 calls, win 71.6%, net +40.7 pts per call, total +8024 pts
+   same side within 5 min on several indexes = ONE call: 173 calls, win 72.3%, net +38.2 pts per call, total +6615 pts

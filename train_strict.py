@@ -69,6 +69,28 @@ def fit_ridge(X, y, lam=30.0):
     return {"mu": mu, "sd": sd, "w": [M[i][d1] for i in range(d1)]}
 
 
+def trend_params(seg, train, mdl, sc):
+    cfg = strict.TREND.get(seg)
+    if not cfg:
+        return None
+    tr = [x for x in train if strict.allowed(seg, x)]
+    dm = sorted(x["feat"][strict.FEATURE_NAMES.index("day_move")] for x in tr)
+    q = 1 - TOP_SHARE[seg]
+    return {"dmCut": dm[int(cfg["dm_q"] * len(dm))], "thr": sc[int(max(0.3, q - cfg["lower"]) * len(sc))]}
+
+
+def calibration(seg, train, mdl):
+    """Score deciles of the index's allowed signals -> share that reached T1 before the stop (for the 60%+ confidence page)."""
+    tr = sorted(((strict.score(mdl, x["feat"]), x["win"]) for x in train if strict.allowed(seg, x)), key=lambda p: p[0])
+    out = []
+    k = max(1, len(tr) // 10)
+    for i in range(0, len(tr), k):
+        chunk = tr[i:i + k]
+        if len(chunk) >= 20:
+            out.append([round(chunk[0][0], 4), round(sum(w for _, w in chunk) / len(chunk), 3)])
+    return out
+
+
 def outcome(m1, m1t, x, T1, S):
     """single lot: win = T1 touched before the stop; stop to entry after T1; followed to the end of the call window."""
     c_end = x["done"]
@@ -131,6 +153,8 @@ def main():
         folds = [(last - (90 - 30 * k) * DAY, last - (60 - 30 * k) * DAY) for k in range(3)]
         folds[-1] = (folds[-1][0], last + 1)
         calls, grades = [], []
+        shares60 = sorted({min(0.9, round(TOP_SHARE[seg] * k, 3)) for k in (1.5, 2, 3, 4, 6)})
+        c60 = {sh: [] for sh in shares60}
         for lo, hi in folds:
             train = [x for x in cands if x["end"] < lo]
             test = [dict(x) for x in cands if lo <= x["t"] < hi and strict.allowed(seg, x)]
@@ -143,9 +167,15 @@ def main():
                 mdl["thrB"] = sc[int((1 - TOP_SHARE_B[seg]) * len(sc))]
             for x in test:
                 x["score"] = strict.score(mdl, x["feat"])
+            mdl["trend"] = trend_params(seg, train, mdl, sc)
             trsel = [dict(x, score=strict.score(mdl, x["feat"])) for x in train if strict.allowed(seg, x)]
-            mdl["filter"] = strict.filter_cut(seg, strict.select(trsel, mdl))
+            mdl["filter"] = strict.filter_cut(seg, [p for p in strict.select(trsel, dict(mdl, trend=None))])
             picks = [p for p in strict.select(test, mdl) if strict.passes(mdl, p)]
+            sure_ids = {(p["tf"], p["t"]) for p in picks}
+            for sh in shares60:                     # extra calls a looser cut-off would add: their real win rate decides the 60%+ page
+                thx = sc[int((1 - sh) * len(sc))]
+                extra = [p for p in strict.select([dict(x) for x in test], dict(mdl, thr=thx, trend=None)) if (p["tf"], p["t"]) not in sure_ids]
+                c60[sh] += [(p["win"], p["pnl"]) for p in extra]
             calls += [(p["t"], p["win"], p["pnl"]) for p in picks]
             pooled += [(seg, dict(p, margin=p["score"] - mdl["thr"])) for p in picks]
             gA = [p for p in picks if p["grade"] == "A"]
@@ -171,8 +201,20 @@ def main():
         mdl["thr"] = sc[int((1 - TOP_SHARE[seg]) * len(sc))]
         if TOP_SHARE_B[seg]:
             mdl["thrB"] = sc[int((1 - TOP_SHARE_B[seg]) * len(sc))]
+        mdl["trend"] = trend_params(seg, train, mdl, sc)
         trsel = [dict(x, score=strict.score(mdl, x["feat"])) for x in train if strict.allowed(seg, x)]
-        mdl["filter"] = strict.filter_cut(seg, strict.select(trsel, mdl))
+        mdl["filter"] = strict.filter_cut(seg, [p for p in strict.select(trsel, dict(mdl, trend=None))])
+        mdl["calib"] = calibration(seg, train, mdl)
+        ok60 = [(sh, v) for sh, v in c60.items() if len(v) >= 20 and sum(w for w, _ in v) / len(v) >= strict.CONF60_MIN]
+        if ok60:
+            sh, v = max(ok60, key=lambda kv: kv[0])          # the loosest cut-off whose extra calls still won >= 60% out of sample
+            mdl["thr60"] = sc[int((1 - sh) * len(sc))]
+            mdl["conf60"] = {"share": sh, "calls": len(v), "winRate": round(sum(w for w, _ in v) / len(v) * 100, 1), "netPerCall": round(sum(p for _, p in v) / len(v), 1)}
+        else:
+            mdl["thr60"], mdl["conf60"] = None, None
+        P("   60%+ confidence tier (extra calls a looser cut-off adds, out of sample): " + ", ".join(
+            f"top {sh:.0%}: {len(v)} calls {sum(w for w, _ in v) / max(len(v), 1) * 100:.0f}% wins {sum(p for _, p in v) / max(len(v), 1):+.1f}" for sh, v in c60.items())
+          + f"  -> used: {mdl['conf60']}")
         top = sorted(zip(strict.FEATURE_NAMES, mdl["w"][:-1]), key=lambda kv: -abs(kv[1]))[:5]
         P("   strongest features: " + ", ".join(f"{k} {v:+.3f}" for k, v in top))
         mdl.update({"rules": {"tfs": list(strict.RULES[seg]["tfs"]), "window": list(strict.RULES[seg]["window"])}, "T1": T1, "stop": S, "X": T1, "topShare": TOP_SHARE[seg], "features": strict.FEATURE_NAMES, "trainedThrough": clock(last), "trainedSignals": len(train),

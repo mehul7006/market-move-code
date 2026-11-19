@@ -585,3 +585,13 @@ Searched: stops 25-60 (T1 90-100% of the stop), model target, candle sizes, time
 sample AND on the 120-day replay. Chosen: T1 22.5 / stop 25, 5-minute candles only, model trained on "T1 before the stop", top 10% of scores, signals before 09:40 skipped.
 Out-of-sample 42 calls, 73.8% wins, +20.9 per call; 120-day replay 67 calls, 64.2% wins, +14.5 per call (before: 156 calls, 56.4%, +9.3). Larger stops (30-60) did not
 reach 62% wins with a positive net in every block. All three indexes on the replay: 288 calls, 61.8% wins, +35.5 per call, +10,214 points.
+
+### Sure calls vs 60%+ confidence calls, same-moment rule, trend-day exception
+- **Sure calls** (the Today's calls page, and every count / win rate / net figure): the strict per-index logic. When the same side is called on several indexes
+  within 5 minutes it is ONE sure call - the index whose score clears its cut-off by the most (`strict.CROSS_DEDUPE_MIN = 5`).
+- **60%+ confidence calls** (a separate view, never counted): the same-moment calls on the other indexes. Looser score cut-offs were tested for this page, but
+  their extra calls won only 44-57% out of sample, so they are not shown (`train_strict.py` prints that test; `thr60` in the model stays empty until one reaches 60%).
+- **Trend-day exception (Nifty only)**: when Nifty has already moved a lot today in the call's direction and the higher timeframe agrees, the cut-off is lowered
+  and the 09:40 filter skipped. Tested also for Bank Nifty (win rate fell) and Sensex (net fell). Entries until 15:00 and a separate afternoon cut-off were
+  tested and did not help.
+- 120-day replay, sure calls: 255 calls, 62.7% wins, +36.8 per call, +9,376 points (Nifty 72.1% / +16.1, Bank Nifty 58.5% / +11.1, Sensex 62.7% / +64.7).

@@ -24,3 +24,5 @@ scorecard_out.json
 short_term_test_*d_calls.csv
 short_term_test_*d_report.md
 server.out
+strict_tf_test_*d_calls.csv
+strict_tf_test_*d_report.md

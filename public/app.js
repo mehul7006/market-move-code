@@ -1097,6 +1097,7 @@ function renderToday(t) {
 
 let activeData = null;
 let activeTerm = "short";
+let activeView = "sure";          // sure | conf60
 let activeStatus = null;          // null = automatic: "running" when something runs, otherwise "all"
 let activeTimer = null;
 let activeBusy = false;
@@ -1180,7 +1181,22 @@ function renderActive() {
   const ltpStrip = Object.entries(d.ltp || {}).map(([seg, v]) => `<span class="fc-badge">${esc(seg)} ${v.last == null ? "—" : fmt(v.last)}</span>`).join(" ");
 
   const items = rows.map(normActive);
-  $("activeBody").innerHTML = `
+  const confItems = (d.conf60 || []).map(normActive);
+  const viewBtn = (k, label) => `<button class="btn ${activeView === k ? "btn-accent" : "ghost"} ac-view" data-v="${k}">${label}</button>`;
+  const viewBar = `<div class="view-nav">${viewBtn("sure", `Sure calls (${rows.length})`)} ${viewBtn("conf60", `60%+ confidence calls (${confItems.length}) — not counted`)}</div>`;
+  if (activeView === "conf60") {
+    $("activeBody").innerHTML = viewBar + `<div class="proof-card">
+      <div class="pf-h">60%+ confidence calls — session ${esc(d.sessionDate || "—")} ${live}</div>
+      <div class="pf-note">These are <b>not</b> sure calls and are <b>not</b> counted in today's calls, win rate or net points. They are signals of the same strategy
+        that missed one sure-call rule but historically reached T1 at least 60% of the time — mostly the same move already called on another index at the
+        same moment (counted once on the Sure calls page). Looser score cut-offs were tested too, but their extra calls won only 44–57%, so they are not shown.</div>
+      ${callListHtml(confItems, "c60", "No 60%+ confidence calls in this session.")}
+    </div>`;
+    bindCallList($("activeBody"), (seg) => { closeActive(); openShortIndex(seg); });
+    document.querySelectorAll(".ac-view").forEach((b) => { b.onclick = () => { activeView = b.dataset.v; renderActive(); }; });
+    return;
+  }
+  $("activeBody").innerHTML = viewBar + `
     <div class="proof-card">
       <div class="pf-h">${c.running ? `${c.running} running now` : "Nothing running right now"} ${live}
         <span class="fc-badge">session ${esc(d.sessionDate || "—")}${d.isToday ? "" : " (last completed)"}</span></div>
@@ -1192,6 +1208,7 @@ function renderActive() {
     </div>`;
   bindCallList($("activeBody"), (seg) => { closeActive(); openShortIndex(seg); });
   document.querySelectorAll(".ac-term").forEach((b) => { b.onclick = () => { activeTerm = b.dataset.v; renderActive(); }; });
+  document.querySelectorAll(".ac-view").forEach((b) => { b.onclick = () => { activeView = b.dataset.v; renderActive(); }; });
   document.querySelectorAll(".ac-stat").forEach((b) => { b.onclick = () => { activeStatus = b.dataset.v; renderActive(); }; });
 }
 
@@ -1250,7 +1267,7 @@ function clDetail(n) {
       <span><b>Entry</b> ${fmt(n.entry)} at ${clClock(n.t)} IST (${esc(n.date)})</span>
       <span><b>Exit</b> ${tail}${n.pts != null ? ` · <b class="${n.pts >= 0 ? "pos" : "neg"}">${n.pts >= 0 ? "+" : ""}${n.pts} pts</b>` : ""}</span>
       ${n.windowEnd ? `<span><b>Window</b> until ${clClock(n.windowEnd)}</span>` : ""}
-      <span><b>Tier</b> ${n.grade === "B" ? "B — lower confidence (looser filter)" : "A — strict filter"}</span>
+      <span><b>Tier</b> ${n.why ? "60%+ confidence — not counted (" + esc(n.why) + (n.prob ? ", about " + Math.round(n.prob * 100) + "% wins historically" : "") + ")" : n.grade === "B" ? "B — lower confidence (looser filter)" : "Sure call — strict filter"}</span>
       <span><b>Signal</b> ${esc(n.family || (n.term === "long" ? "Long-term precision profile" : "short term"))}${n.patterns && n.patterns.length ? " · patterns: " + esc(n.patterns.join(", ")) : ""}</span>
       <span><a href="#" class="cl-idx" data-seg="${esc(n.seg)}">Open the ${esc(n.name)} page — research &amp; prediction logic →</a></span>
     </div></div>`;
@@ -1298,7 +1315,7 @@ function normActive(r) {
     t1After: r.touched.t1 ? Math.round((r.touched.t1 - r.generatedAt) / 60) : null,
     t2After: r.touched.t2 ? Math.round((r.touched.t2 - r.generatedAt) / 60) : null,
     t3After: r.touched.t3 ? Math.round((r.touched.t3 - r.generatedAt) / 60) : null,
-    grade: r.grade || "A", trigger: r.trigger, until: r.until, pts: r.pts ?? null, exitAt: r.exitAt ?? null, reason: r.kind ? ({ SL: "Stop loss touched", BE: "Stop moved to entry after T1 - touched", END: "Window ended - closed at last price" })[r.kind] : null,
+    grade: r.grade || "A", prob: r.prob, why: r.why, trigger: r.trigger, until: r.until, pts: r.pts ?? null, exitAt: r.exitAt ?? null, reason: r.kind ? ({ SL: "Stop loss touched", BE: "Stop moved to entry after T1 - touched", END: "Window ended - closed at last price" })[r.kind] : null,
     windowEnd: r.windowEnd, patterns: r.patterns, family: r.family ? (r.family === "vwapx" ? "VWAP reclaim in a trend" : "Trend pullback resume") : null };
 }
 
