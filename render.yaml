@@ -10,7 +10,9 @@
 #                                   sleeping and redeploys, and the app switches to it automatically whenever the daily token is expired.
 #       - UPSTOX_ACCESS_TOKEN     = the normal daily token (optional; expires ~03:30 IST every night). With the Analytics token set you do not
 #                                   need to touch it - paste a fresh one only if you want the full-access token for the live calls.
-#   * To stop it sleeping, point a free uptime pinger (UptimeRobot / cron-job.org) at /healthz every 10 minutes.
+#   * It stays awake while you need it: during market hours (weekdays 08:45-15:45 IST) the app pings its own public address (/healthz) every 10 minutes, so
+#     the free service does not sleep and a token pasted in the Access panel is not forgotten mid-session. Outside those hours it may sleep (saving free
+#     hours); the first visit wakes it. KEEPALIVE_MODE=always keeps it awake 24/7 (~744 of the 750 free hours), KEEPALIVE_MODE=off disables it.
 services:
   - type: web
     name: market-signal-desk

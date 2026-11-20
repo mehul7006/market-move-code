@@ -17,20 +17,33 @@ ENV_PATH = os.environ.get("DESK_ENV_FILE") or os.path.join(ROOT, ".env")
 ENV_KEYS = ("DESK_USER", "DESK_PASS", "DESK_ADMIN_KEY", "UPSTOX_API_KEY", "UPSTOX_API_SECRET", "UPSTOX_ACCESS_TOKEN", "UPSTOX_ANALYTICS_TOKEN")
 
 
-def _exp(token):
+def claims(token):
+    """Payload of an Upstox JWT ({} when it is not one)."""
     try:
         import base64, json
         p = token.split(".")[1]
-        return int(json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))["exp"])
+        return json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
     except Exception:
-        return 0
+        return {}
+
+
+def _exp(token):
+    return int(claims(token).get("exp") or 0)
+
+
+def token_rank(token):
+    """Which of two tokens should win: a VALID one first, then a normal daily token over a long-lived read-only Analytics token
+    (isExtended), then the most recently ISSUED one (iat). So the token you pasted today always beats an older or longer-lived one."""
+    c = claims(token)
+    import time
+    return (int(c.get("exp") or 0) > time.time(), not c.get("isExtended"), int(c.get("iat") or 0))
 
 
 def _from_environ():
     return {k: os.environ[k].strip() for k in ENV_KEYS if os.environ.get(k, "").strip()}
 
 _lock = threading.Lock()
-_cache = {"mtime": None, "env": {}}
+_cache = {"mtime": None, "file": {}}
 
 
 def load_env(path=ENV_PATH):
@@ -46,24 +59,35 @@ def load_env(path=ENV_PATH):
     return env
 
 
+def _merge(env_vars, file_vars):
+    merged = {**env_vars, **file_vars}
+    # Tokens can come from two places (the saved file and the host's environment variable) and into either of two slots. Sort them by KIND, whatever
+    # slot they were put in, then let the best one of each kind win - re-decided on every call because tokens expire while the server runs:
+    #   UPSTOX_ACCESS_TOKEN    <- the best normal daily token (valid first, then the most recently issued)
+    #   UPSTOX_ANALYTICS_TOKEN <- the best long-lived read-only token (isExtended)
+    pool = [v for src in (env_vars, file_vars) for key in ("UPSTOX_ACCESS_TOKEN", "UPSTOX_ANALYTICS_TOKEN") for v in [src.get(key)] if v]
+    daily = [t for t in pool if not claims(t).get("isExtended")]
+    ext = [t for t in pool if claims(t).get("isExtended")]
+    for key, group in (("UPSTOX_ACCESS_TOKEN", daily), ("UPSTOX_ANALYTICS_TOKEN", ext)):
+        if group:
+            merged[key] = max(group, key=token_rank)
+        else:
+            merged.pop(key, None)
+    return merged
+
+
 def current(path=ENV_PATH):
-    """Cached read keyed on the file's mtime, so edits apply without a restart."""
+    """Settings from the saved file plus real environment variables. The file is re-read only when it changes."""
     try:
         mtime = os.path.getmtime(path)
     except OSError:
-        return _from_environ()
+        return _merge(_from_environ(), {})
     with _lock:
         if _cache["mtime"] != mtime:
-            env_vars, file_vars = _from_environ(), load_env(path)
-            merged = {**env_vars, **file_vars}
-            # The access token expires every night. If the host's environment variable holds a NEWER token than the saved
-            # file (e.g. the Render dashboard was updated), the one that lasts longer wins.
-            a, b = env_vars.get("UPSTOX_ACCESS_TOKEN"), file_vars.get("UPSTOX_ACCESS_TOKEN")
-            if a and b and _exp(a) > _exp(b):
-                merged["UPSTOX_ACCESS_TOKEN"] = a
-            _cache["env"] = merged
+            _cache["file"] = load_env(path)
             _cache["mtime"] = mtime
-        return dict(_cache["env"])
+        file_vars = dict(_cache["file"])
+    return _merge(_from_environ(), file_vars)
 
 
 def write_var(key, value, path=ENV_PATH):

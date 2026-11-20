@@ -2611,9 +2611,10 @@ function renderAccess() {
   const s = accessState.status || {};
   const feed = s.feed || {};
   const url = s.publicUrl || "";
-  const tokenLine = !known ? "—" : s.configured
-    ? `set · ${s.expiresLabel ? s.expiresLabel + " left" : "expiry unknown"}`
-    : "no token";
+  const dt = s.dailyToken || {}, at = s.analyticsToken || {};
+  const dailyLine = !known ? "—" : !dt.configured ? "not set" : dt.valid ? `valid · ${dt.expiresLabel || "?"} left` : "expired / rejected";
+  const analyticsLine = !known ? "—" : !at.configured ? "not set" : `${at.inUse ? "IN USE" : "standby"} · ${at.expiresLabel || "?"} left`;
+  const usingLine = !known ? "—" : s.feedUsing === "daily" ? "daily token" : s.feedUsing === "analytics" ? "Analytics token (automatic)" : "no token";
   const feedStatus = !known ? "—" : feed.online ? "LIVE" : "DOWN";
   const feedClass = !known ? "" : feed.online ? "up" : "down";
   const help = accessState.error
@@ -2625,11 +2626,13 @@ function renderAccess() {
       <div class="access-card">
         <div class="ac-h">Upstox feed</div>
         <div class="ac-row"><span>Status</span><b class="${feedClass}">${feedStatus}</b></div>
-        <div class="ac-row"><span>Token</span><b>${esc(tokenLine)}</b></div>
+        <div class="ac-row"><span>Feed is using</span><b>${esc(usingLine)}</b></div>
+        <div class="ac-row"><span>Daily token</span><b>${esc(dailyLine)}</b></div>
+        <div class="ac-row"><span>Analytics token (fallback)</span><b>${esc(analyticsLine)}</b></div>
         <div class="ac-row"><span>Nifty quote</span><b>${!known || feed.nifty == null ? "—" : fmt(feed.nifty)}</b></div>
         ${known && feed.error ? `<div class="ac-err">${esc(feed.error)}</div>` : ""}
-        <div class="ac-note">A token lives ~1 day. When it expires the desk stays honest and shows feed
-          errors — paste a fresh token below and every panel reloads on the new feed.</div>
+        <div class="ac-note">The daily token lives until ~03:30 IST the next morning; the token you paste is always used first. If it is missing or
+          expired the long-lived Analytics token takes over by itself, so nothing breaks.${s.storageNote ? " " + esc(s.storageNote) : ""}</div>
       </div>
       <div class="access-card">
         <div class="ac-h">Public link</div>

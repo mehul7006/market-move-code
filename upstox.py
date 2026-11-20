@@ -176,6 +176,7 @@ class UpstoxClient:
         self.token = token
         self.fallback = fallback
         self.using_fallback = False
+        self.fallback_since = 0.0
         self.switches = 0
 
     def set_primary(self, token):
@@ -190,10 +191,14 @@ class UpstoxClient:
 
     def active_token(self):
         """The token the next call uses: the daily token while it is valid, otherwise the Analytics token."""
+        # a switch to the fallback caused by a one-off glitch must not last forever: look at the daily token again every 5 minutes
+        if self.using_fallback and self._usable(self.token) and not GOVERNOR.token_blocked(self.token) and time.time() - self.fallback_since > 300:
+            self.using_fallback = False
         if self.fallback and (self.using_fallback or not self._usable(self.token) or GOVERNOR.token_blocked(self.token)):
             if self._usable(self.fallback) and not GOVERNOR.token_blocked(self.fallback):
                 if not self.using_fallback:
                     self.using_fallback = True
+                    self.fallback_since = time.time()
                     self.switches += 1
                 return self.fallback
         return self.token
@@ -220,6 +225,7 @@ class UpstoxClient:
                     GOVERNOR.auth_failed(tok)
                     if self.fallback and tok != self.fallback and self._usable(self.fallback):
                         self.using_fallback = True               # daily token rejected: switch to the Analytics token and retry this call
+                        self.fallback_since = time.time()
                         self.switches += 1
                         continue
                     raise UpstoxError(f"HTTP 401: {body}") from None

@@ -46,6 +46,7 @@ TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN") or ENV.get("UPSTOX_ACCESS_TOKEN", 
 ANALYTICS_TOKEN = os.environ.get("UPSTOX_ANALYTICS_TOKEN") or ENV.get("UPSTOX_ANALYTICS_TOKEN", "")
 UX = upstox.UpstoxClient(TOKEN, ANALYTICS_TOKEN or None)
 _token_lock = threading.Lock()
+_KEEPALIVE = {"mode": "off"}
 
 # Nifty 50 stock book: additive to the six index segments. Quotes and breadth answer every
 # request; the per-stock six-month audits run in a rate-limited background worker.
@@ -284,10 +285,15 @@ def _sync_token_from_env():
     """Pick up a token written by upstox_login.py or the Access panel without a restart."""
     env_now = desk_env.current()
     atok = env_now.get("UPSTOX_ANALYTICS_TOKEN") or ""
-    if atok and atok != UX.fallback:
-        UX.fallback = atok
     tok = env_now.get("UPSTOX_ACCESS_TOKEN") or ""
-    if tok and tok != UX.token:
+    if tok and _is_analytics(tok):
+        # a long-lived Analytics token was put in the daily-token slot: it is the FALLBACK, never the first-priority token
+        if not atok or desk_env.token_rank(tok) > desk_env.token_rank(atok):
+            atok = tok
+        tok = ""
+    if atok != (UX.fallback or ""):
+        UX.fallback = atok or None
+    if tok != (UX.token or ""):
         with _token_lock:
             UX.set_primary(tok)
             with _cache_lock:
@@ -361,12 +367,19 @@ def token_status():
     left = upstox.token_seconds_left(token) if token else None
     a_left = upstox.token_seconds_left(UX.fallback) if UX.fallback else None
     primary_ok = bool(token) and (left is None or left > 0) and not upstox.GOVERNOR.token_blocked(token)
+    on_render = bool(os.environ.get("RENDER"))
+    using = "analytics" if (UX.fallback and (UX.using_fallback or not primary_ok)) else ("daily" if token else "none")
     user, password, admin_key = _auth_config()
     return {
         "configured": bool(token) or bool(UX.fallback),
         "expiresInSec": left,
         "expiresLabel": _expires_label(left),
+        "keepAlive": dict(_KEEPALIVE),
+        "feedUsing": using,
+        "onRender": on_render,
         "dailyToken": {"configured": bool(token), "valid": primary_ok, "expiresLabel": _expires_label(left)},
+        "storageNote": ("Render's free plan clears saved files whenever the service sleeps, so a token pasted here is forgotten after a sleep or redeploy; "
+                        "the Analytics token (environment variable) covers that." if on_render else None),
         "analyticsToken": {"configured": bool(UX.fallback), "expiresLabel": _expires_label(a_left), "inUse": bool(UX.using_fallback or (UX.fallback and not primary_ok)),
                            "switches": UX.switches},
         "feed": _feed_probe(),
@@ -1675,10 +1688,15 @@ def build_market(force=False):
         if not upstox_ok:
             notes.append(f"UPSTOX FEED DOWN: {friendly_feed_error(quote_error)}. Charts fall back to Yahoo real data; "
                          "option/OI panels are disabled. Open Access and paste a fresh token, or run "
-                         "python upstox_login.py.")
+                         "python upstox_login.py." if not UX.fallback else
+                         f"UPSTOX FEED DOWN: {friendly_feed_error(quote_error)}. Both the daily token and the Analytics token were refused - open Access and paste a fresh token.")
         elif token_left is not None and token_left < 1800:
-            notes.append(f"Upstox access token expires in {max(token_left // 60, 0)} min - "
-                         "paste a fresh one in the Access panel.")
+            a_left = upstox.token_seconds_left(UX.fallback) if UX.fallback else None
+            if a_left is not None and a_left > 86400:
+                pass     # the long-lived Analytics token takes over automatically - nothing for the user to do
+            else:
+                notes.append(f"Upstox access token expires in {max(token_left // 60, 0)} min - "
+                             "paste a fresh one in the Access panel.")
         opt_fail = [i["id"] for i in items if i["source"]["options"] == "ERROR"]
         if opt_fail:
             notes.append("Option chain failed for: " + ", ".join(opt_fail))
@@ -2318,6 +2336,29 @@ def main():
     if LITE:
         sys.setswitchinterval(0.001)       # hand the interpreter lock to waiting request threads more often
     threading.Thread(target=_background_refresher, daemon=True, name="market-refresher").start()
+    # Keep-alive for Render's free plan: the service sleeps after ~15 minutes without inbound requests, which wipes the saved token and the warm data.
+    # A request to the service's OWN public address (RENDER_EXTERNAL_URL, set by Render) arrives through Render's router and counts as traffic.
+    # /healthz does no work and does not wake the heavy background refresh. KEEPALIVE_MODE: market (default: weekdays 08:45-15:45 IST) | always | off.
+    ext = (os.environ.get("KEEPALIVE_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    mode = (os.environ.get("KEEPALIVE_MODE") or ("off" if os.environ.get("KEEPALIVE", "1").strip() in ("0", "false", "no") else "market")).strip().lower()
+    _KEEPALIVE.update({"mode": mode if ext else "off", "url": bool(ext), "pings": 0, "lastOk": None, "lastAt": None, "lastError": None})
+    if ext and mode != "off":
+        def _keepalive():
+            time.sleep(45)
+            while True:
+                try:
+                    t = ist_now()
+                    mins = t.tm_hour * 60 + t.tm_min
+                    if mode == "always" or (t.tm_wday < 5 and 8 * 60 + 45 <= mins <= 15 * 60 + 45):
+                        urllib.request.urlopen(ext + "/healthz", timeout=25).read()
+                        _KEEPALIVE.update({"pings": _KEEPALIVE["pings"] + 1, "lastOk": True, "lastAt": time.time(), "lastError": None})
+                except Exception as exc:
+                    _KEEPALIVE.update({"lastOk": False, "lastAt": time.time(), "lastError": str(exc)[:120]})
+                time.sleep(600)          # every 10 minutes - under Render's 15-minute idle limit
+        threading.Thread(target=_keepalive, daemon=True, name="keepalive").start()
+        print(f"Keep-alive ON ({mode}): pinging {ext}/healthz every 10 minutes so the free service does not sleep (KEEPALIVE_MODE=always or off to change)")
+    else:
+        print("Keep-alive off" + ("" if ext else " (not running on Render - no public URL variable)"))
     try:
         import optrecorder
         if optrecorder.enabled(sys.modules[__name__]):

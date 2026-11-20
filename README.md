@@ -623,3 +623,13 @@ at a time instead of hammering it; saving a new token clears that pause immediat
 Pasting a token in the Access panel works for both: an Analytics token (its payload says `isExtended`) is saved as the fallback and leaves the daily token alone. Checked against the real
 API with the Analytics token: quotes, 1m / 5m / daily candles (live and historical), option expiries and the option chain with OI, volume and greeks all work. It cannot read the user
 profile (Upstox refuses that for it), which the app does not need. `/api/token` shows both tokens' status.
+
+### Token priority (fixed): the token you paste always wins
+Why Render could show "token expired" while Upstox still accepted the token: (1) Render's free plan wipes saved files whenever the service sleeps, so a token pasted in the Access
+panel was forgotten and the app fell back to an old value in the environment variable; (2) the old rule "the token that expires later wins" let a long-lived token in the environment
+beat the daily token you had just pasted. Now `desk_env` sorts every token by kind and ranks them each time they are read: a VALID token first, a normal daily token over the
+long-lived Analytics token, then the most recently issued (`iat`). An Analytics token found in either slot becomes the fallback (never the first priority). When the daily token
+is missing, expired or rejected the app uses the Analytics token automatically, and it looks at the daily token again every 5 minutes so a one-off glitch does not leave it on the
+fallback. The Access panel shows "Feed is using", the daily token and the Analytics token separately. The tokens' own expiry (`exp`) is Upstox's expiry (~03:30 IST), so "expired"
+in the panel means the app's copy of the token is expired or was lost, not that Upstox changed anything. On Render the app pings its own public URL every 10 minutes during market hours (`KEEPALIVE_MODE=market`, the default: weekdays 08:45-15:45 IST; `always` = 24/7, ~744 of Render's 750 free
+hours per service per month; `off`) so the free service does not sleep and forget a pasted token mid-session.
