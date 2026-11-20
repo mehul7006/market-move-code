@@ -555,7 +555,7 @@ def _hist_1m(inst):
             pass
         rows = {}
         today = datetime.date.today()
-        for k in range(3 if LITE else 7):        # ~189 days for the 6-month scorecard; 81 days in lite mode
+        for k in range(2 if LITE else 7):        # ~189 days for the 6-month scorecard; 54 days in lite mode
             end = today - datetime.timedelta(days=27 * k + 1)
             start = end - datetime.timedelta(days=26)
             try:
@@ -755,6 +755,9 @@ def _inject_ltp(cmap1, quotes, now):
 def build_short(days=60):
     """Short-term page payload (shortterm.py): 1m / 5m / 15m / 30m. Real Upstox candles only. Open calls are
     tracked live, including the still-forming minute, so a touch counts the moment price reaches a level."""
+    if LITE:
+        days = min(days, 25)
+
     def make():
         cmap = {1: {}, 5: {}, 15: {}, 30: {}}
         errors = {}
@@ -778,7 +781,7 @@ def build_short(days=60):
                 if o["base5"] is not None:
                     cmap[5][pid] = o["base5"]
                     cmap[15][pid] = shortterm.resample(o["base5"], 15)
-                    cmap[30][pid] = shortterm.resample(o["base5"], 30)
+                    cmap[30][pid] = [] if LITE else shortterm.resample(o["base5"], 30)
                 else:
                     errors[pid] = o["e5"]
                 if o["m1"] is not None:
@@ -949,7 +952,7 @@ def _audit_candles(inst):
     """Real 5m bars for the walk-forward audit (chart keeps only the recent slice)."""
     rows = {}
     try:
-        for c in _history(inst, AUDIT_DAYS.get(inst["id"], 30)):
+        for c in _history(inst, min(AUDIT_DAYS.get(inst["id"], 30), 60) if LITE else AUDIT_DAYS.get(inst["id"], 30)):
             rows[c["t"]] = c
     except Exception:
         pass
@@ -1649,12 +1652,15 @@ def _background_refresher():
             time.sleep(10)
             continue
         try:
+            _remember("short", build_short(60))
+            _remember("active", build_active())
+        except Exception:
+            pass
+        try:
             build_market(force=True)
         except Exception:
             pass
         try:
-            _remember("short", build_short(60))
-            _remember("active", build_active())
             if not LITE and time.time() - _last.get("score", (0,))[0] > 1800:      # heavy: every 30 min
                 _remember("score", build_scorecard())
         except Exception:
@@ -1697,6 +1703,11 @@ def build_market(force=False):
             else:
                 notes.append(f"Upstox access token expires in {max(token_left // 60, 0)} min - "
                              "paste a fresh one in the Access panel.")
+        import strict as _strict_mod
+        missing = [n for n, m in (("strict_model.json (sure calls)", _strict_mod.model()), ("conf_model.json (confidence calls)", _strict_mod.conf_model())) if not m]
+        if missing:
+            notes.append("STRATEGY MODEL FILE MISSING: " + ", ".join(missing) + " - the engine cannot score signals, so NO short-term calls can be generated. "
+                         "The file must be in the deployed image (Dockerfile COPY) / repository.")
         opt_fail = [i["id"] for i in items if i["source"]["options"] == "ERROR"]
         if opt_fail:
             notes.append("Option chain failed for: " + ", ".join(opt_fail))
@@ -2328,7 +2339,11 @@ def main():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Market Signal Desk running at  http://localhost:{PORT}")
     left = upstox.token_seconds_left(TOKEN)
-    print(f"Upstox token: {'missing' if not TOKEN else (f'valid ~{left // 3600}h {(left % 3600) // 60}m' if left and left > 0 else 'EXPIRED')}")
+    _al = upstox.token_seconds_left(UX.fallback) if UX.fallback else None
+    print(f"Upstox daily token: {'not set' if not TOKEN else (f'valid ~{left // 3600}h {(left % 3600) // 60}m' if left and left > 0 else 'expired')}"
+          + (f" | Analytics token (automatic fallback): valid ~{_al // 86400} days" if _al and _al > 0 else " | Analytics token: not set"))
+    import strict as _sm
+    print("Strategy models:", "OK (sure + confidence)" if (_sm.model() and _sm.conf_model()) else "MISSING - no calls can be generated")
     print(f"Access panel key: {admin_key if created else 'saved in .env as DESK_ADMIN_KEY'}")
     site_user, site_pass, _ = _auth_config()
     if site_user and site_pass:

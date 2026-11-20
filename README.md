@@ -633,3 +633,10 @@ is missing, expired or rejected the app uses the Analytics token automatically, 
 fallback. The Access panel shows "Feed is using", the daily token and the Analytics token separately. The tokens' own expiry (`exp`) is Upstox's expiry (~03:30 IST), so "expired"
 in the panel means the app's copy of the token is expired or was lost, not that Upstox changed anything. On Render the app pings its own public URL every 10 minutes during market hours (`KEEPALIVE_MODE=market`, the default: weekdays 08:45-15:45 IST; `always` = 24/7, ~744 of Render's 750 free
 hours per service per month; `off`) so the free service does not sleep and forget a pasted token mid-session.
+
+### Why Render showed 0 calls (fixed)
+The Docker image copied only `*.py`, `public/` and three named files, so `strict_model.json` and `conf_model.json` were NOT in the image: with no model the engine cannot score any signal and
+issued no sure and no confidence calls. The Dockerfile now copies both, and the page shows "STRATEGY MODEL FILE MISSING" (and the log prints "Strategy models: MISSING") if one is ever
+absent. The first start on the free 0.1-CPU plan was also very slow (about 22 minutes), which looked like "nothing shows" and failed health checks: signal detection is now 4-5x cheaper
+(same calls, scores within 0.001), lite mode loads 54 days of 1-minute and 60 days of 5-minute history, computes the last 25 days of calls, and refreshes the call pages before the
+dashboard. Measured in a 0.1-CPU / 512 MB container with only the Analytics token: ready in about 2 minutes with the same calls as the full-CPU build.

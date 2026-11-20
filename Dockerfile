@@ -22,6 +22,8 @@ WORKDIR /app
 COPY *.py ./
 COPY public ./public
 COPY data_audit_report.txt walkforward_result.json scorecard_snapshot.json ./
+# the strategy models: WITHOUT these the engine has nothing to score signals with and issues no calls at all
+COPY strict_model.json conf_model.json ./
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && chmod +x /usr/local/bin/docker-entrypoint.sh
 

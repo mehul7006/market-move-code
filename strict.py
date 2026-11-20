@@ -41,6 +41,7 @@ HTF = {1: 5, 5: 15}                       # higher timeframe used for the trend-
 FIRST_ENTRY, LAST_ENTRY = 9 * 60 + 25, 14 * 60 + 15        # SURE calls: entries 09:25-14:15 (locked)
 CONF_LAST_ENTRY = 15 * 60 + 15                               # confidence-tier calls may be generated until 15:15
 CONF_PATH = os.path.join(HERE, "conf_model.json")
+HISTORY_PAD_DAYS = 8                                         # extra days before the first call day that are used only to warm up the indicators
 SESSION_CLOSE = 15 * 60 + 30
 # Per-index call rules (found by a walk-forward search, see train_strict.py): which candle sizes may issue a call and in which time window.
 # "window" = (earliest, latest) signal time as hours after 09:15 (None = no limit): 2.75 -> 12:00, 0.75 -> 10:00, 4.25 -> 13:30.
@@ -178,11 +179,17 @@ def raw_signals(cs, F, start=60, last_entry=None):
     """{family: [(i, side)]} for candles i >= start, using candles <= i only."""
     out = {f: [] for f in FAMILIES}
     n = len(cs)
-    d0 = None
-    or_hi = or_lo = None
+    mins_of = [((c["t"] + 19800) % 86400) // 60 for c in cs]
+    day_of = [(c["t"] + 19800) // 86400 for c in cs]
+    opening = {}                                   # day -> (high, low) of the 09:15-09:29 candles
+    for i, c in enumerate(cs):
+        if mins_of[i] < 9 * 60 + 30:
+            o = opening.get(day_of[i])
+            opening[day_of[i]] = (c["high"], c["low"]) if o is None else (max(o[0], c["high"]), min(o[1], c["low"]))
+    limit = last_entry or LAST_ENTRY
     for i in range(max(60, start), n):
         c = cs[i]
-        m = _mins(c["t"])
+        m = mins_of[i]
         a = F["atr"][i]
         if not a or m < FIRST_ENTRY or m > (last_entry or LAST_ENTRY):
             continue
@@ -205,12 +212,9 @@ def raw_signals(cs, F, start=60, last_entry=None):
                 out["pullback"].append((i, -1))
         # 3. opening-range breakout (range = first 15 minutes)
         if m >= 9 * 60 + 30:
-            j = i
-            while j > 0 and _day(cs[j - 1]["t"]) == _day(c["t"]):
-                j -= 1
-            rng = [x for x in cs[j:i + 1] if _mins(x["t"]) < 9 * 60 + 30]
+            rng = opening.get(day_of[i])
             if rng:
-                orh, orl = max(x["high"] for x in rng), min(x["low"] for x in rng)
+                orh, orl = rng
                 if pc <= orh < close and e21 > e50 and r > 50:
                     out["orb"].append((i, 1))
                 elif pc >= orl > close and e21 < e50 and r < 50:
@@ -363,8 +367,9 @@ def prepare(candles_by_tf, now, days=120):
             continue
         allc, pool = [], []
         for tf in TFS:
-            cs = [c for c in (candles_by_tf.get(tf) or {}).get(seg) or [] if c.get("done", True) is not False and c["t"] + c.get("dur", tf * 60) <= now]
-            raw5 = [c for c in (candles_by_tf.get(5) or {}).get(seg) or [] if c.get("done", True) is not False and c["t"] + c.get("dur", 300) <= now]
+            keep_from = first - HISTORY_PAD_DAYS * 86400                  # warm-up history for the indicators (EMA / ATR / RSI / VWAP)
+            cs = [c for c in (candles_by_tf.get(tf) or {}).get(seg) or [] if c["t"] >= keep_from and c.get("done", True) is not False and c["t"] + c.get("dur", tf * 60) <= now]
+            raw5 = [c for c in (candles_by_tf.get(5) or {}).get(seg) or [] if c["t"] >= keep_from - 10 * 86400 and c.get("done", True) is not False and c["t"] + c.get("dur", 300) <= now]
             h = HTF[tf]
             if h == 5:
                 hcs = raw5

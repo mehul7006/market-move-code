@@ -34,6 +34,7 @@ import statistics
 import time
 
 import bisect
+import os
 
 import analysis
 
@@ -104,8 +105,11 @@ _PICKS60 = {}    # (segment, candle minutes) -> 60%+ confidence (not sure) calls
 _PICKS = {}   # (segment, candle minutes) -> {candle open time: (side, score, family)}, set by prepare_strict()
 
 
-def prepare_strict(candles_by_tf, now, days=200):
-    """Choose the calls for every index (all candle sizes together) before any replay()."""
+def prepare_strict(candles_by_tf, now, days=None):
+    """Choose the calls for every index (all candle sizes together) before any replay().
+    The free hosting tier (LITE_MODE, 0.1 CPU) only needs the recent sessions, so it computes 25 days instead of 200."""
+    if days is None:
+        days = 25 if os.environ.get("LITE_MODE", "").strip().lower() in ("1", "true", "yes") else 200
     _PICKS.clear()
     _PENDING.clear()
     _PENDING60.clear()
