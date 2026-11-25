@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import analysis
+import btst
 import data_sources as yahoo
 import desk_env
 import nifty50
@@ -1438,6 +1439,344 @@ def _overnight_csv(res):
 
 
 
+# ---------------------------------------------------------------- BTST / next-open prediction
+# Additive and separate: btst.py has its own setup, model and gate. Nothing here feeds the intraday
+# sure calls, the confidence calls, the short-term book or the overnight model above.
+
+BTST_FROM = "2015-01-01"
+BTST_PEERS = ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "NEXT50", "MIDCPNIFTY")
+BTST_VIX = {"id": "INDIAVIX", "name": "India VIX", "key": "NSE_INDEX|India VIX", "yahoo": "^INDIAVIX"}
+
+
+def _btst_daily(inst):
+    """~10 years of real daily bars for the BTST audit: Upstox first, Yahoo (real, labelled) as fallback."""
+    path = os.path.join(CACHE_DIR, f"btst_{inst['id']}_daily.json")
+
+    def fetch():
+        try:
+            if time.time() - os.path.getmtime(path) < 6 * 3600:
+                with open(path, encoding="utf-8") as fh:
+                    hit = json.load(fh)
+                if len(hit.get("rows") or []) > 600:
+                    return hit
+        except Exception:
+            pass
+        rows, src, error = [], "ERROR", None
+        try:
+            end = datetime.date.today()
+            mid = datetime.date(2020, 1, 1)
+            got = []
+            for a, b in ((datetime.date.fromisoformat(BTST_FROM), mid - datetime.timedelta(days=1)), (mid, end)):
+                got += UX.candles(inst["key"], "days", 1, b.isoformat(), a.isoformat())
+            rows, src = _normalise_daily(got), "UPSTOX"
+        except Exception as exc:
+            error = str(exc)
+        if len(rows) < 600 and inst.get("yahoo"):
+            try:
+                alt = _normalise_daily(yahoo.yahoo_chart(inst["yahoo"], "10y", "1d").get("candles") or [])
+                if len(alt) > len(rows):
+                    rows, src, error = alt, "YAHOO", None
+            except Exception as exc:
+                error = error or str(exc)
+        if len(rows) < 60:
+            raise RuntimeError(error or "no daily history from Upstox or Yahoo")
+        out = {"rows": rows, "src": src}
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(out, fh)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+        return out
+
+    return cached(f"btst-daily:{inst['id']}", 1800, fetch)
+
+
+def _btst_vix_today(today):
+    """Today's India VIX bar from real Upstox 5m candles (None when unavailable - Grade A then cannot fire)."""
+    def fetch():
+        rows = UX.intraday(BTST_VIX["key"], "minutes", 5)
+        return [c for c in rows if _ist_date(c["t"]) == today]
+    try:
+        rows = sorted(cached(f"btst-vix-intra:{today}", 120, fetch), key=lambda c: c["t"])
+    except Exception:
+        return None
+    if not rows:
+        return None
+    return {"t": _ist_midnight(today), "open": rows[0]["open"], "high": max(c["high"] for c in rows),
+            "low": min(c["low"] for c in rows), "close": rows[-1]["close"], "volume": 0}
+
+
+def _btst_bars(hist, it, today):
+    """Daily history plus every recent session that the EOD history does not have yet, each aggregated from real
+    Upstox 5m bars (labelled UPSTOX 5m->1D). Today's forming bar always replaces a stale EOD copy until 15:25."""
+    bars = {_ist_date(b["t"]): dict(b) for b in hist["rows"]}
+    by_day = {}
+    for c in it.get("candles") or []:
+        by_day.setdefault(_ist_date(c["t"]), []).append(c)
+    agg_today = None
+    for day, rows in sorted(by_day.items()):
+        rows.sort(key=lambda c: c["t"])
+        hm = time.gmtime(rows[-1]["t"] + 19800)
+        agg = {"t": _ist_midnight(day), "open": rows[0]["open"], "high": max(c["high"] for c in rows),
+               "low": min(c["low"] for c in rows), "close": rows[-1]["close"], "volume": 0,
+               "src": "UPSTOX 5m->1D", "complete": (hm.tm_hour, hm.tm_min) >= (15, 25)}
+        if day == today:
+            agg_today = agg
+        first = rows[0]["t"]
+        fh = time.gmtime(first + 19800)
+        full_session = (fh.tm_hour, fh.tm_min) <= (9, 20)
+        if day not in bars and full_session and (agg["complete"] or day == today):
+            bars[day] = agg
+        elif day == today and day in bars and not agg["complete"]:
+            bars[day] = dict(bars[day], **{k: agg[k] for k in ("open", "high", "low", "close", "src")})
+    return [bars[d] for d in sorted(bars)], agg_today
+
+
+def _btst_next_session(day):
+    nxt = day + datetime.timedelta(days=1)
+    while nxt.weekday() >= 5:
+        nxt += datetime.timedelta(days=1)
+    return nxt
+
+
+def build_btst():
+    return cached("btst-payload", 60, _build_btst)
+
+
+def _build_btst():
+    """BTST payload: next-session open prediction for every segment, and SURE calls only when every gate passes."""
+    data = build_market()
+    items = {i["id"]: i for i in data["instruments"]}
+    today = _ist_today()
+    now = ist_now()
+    now_min = now.tm_hour * 60 + now.tm_min
+    params = btst.PARAMS
+    by_id = {i["id"]: i for i in INSTRUMENTS}
+
+    # every index's daily history with today's real bar folded in (official EOD when published, else 5m aggregate)
+    series, meta = {}, {}
+    for iid in BTST_PEERS:
+        inst = by_id[iid]
+        try:
+            hist = _btst_daily(inst)
+            bars, agg = _btst_bars(hist, items.get(iid) or {}, today)
+            series[iid] = bars
+            meta[iid] = {"src": hist["src"], "agg": agg, "error": None}
+        except Exception as exc:
+            meta[iid] = {"src": "ERROR", "agg": None, "error": str(exc)}
+    vix_rows, vix_note = [], None
+    try:
+        vh = _btst_daily(BTST_VIX)
+        vix_rows = [dict(r) for r in vh["rows"]]
+        if not any(_ist_date(r["t"]) == today for r in vix_rows) and today.weekday() < 5:
+            vt = _btst_vix_today(today)
+            if vt:
+                vix_rows.append(vt)
+            elif any(_ist_date(b["t"]) == today for rows in series.values() for b in rows):
+                vix_note = "India VIX for today is unavailable, so no Grade A setup can print today."
+    except Exception as exc:
+        vix_note = f"India VIX history unavailable ({exc}); Grade A (VIX falling) cannot print."
+
+    segments, sure_calls, ledger = [], [], []
+    for inst in INSTRUMENTS:
+        if not inst.get("tradeable"):
+            continue
+        iid = inst["id"]
+        m = meta.get(iid) or {}
+        entry = {"id": iid, "name": inst["name"], "status": "ERROR", "statusLabel": "FEED ERROR",
+                 "error": m.get("error"), "phase": None, "sessionDate": None, "nextSession": None,
+                 "dataSource": None, "bars": 0, "prediction": None, "setup": None, "sure": False,
+                 "blockReasons": [], "plan": None, "audit": None, "sureStats": None,
+                 "recentPredictions": [], "lastSure": None}
+        segments.append(entry)
+        if iid not in series:
+            continue
+        bars = series[iid]
+        try:
+            res = btst.analyse(bars, vix_rows, {k: v for k, v in series.items()}, params)
+        except Exception as exc:
+            entry["error"] = f"btst model: {exc}"
+            continue
+        if not res.get("ok"):
+            entry["error"] = res.get("reason")
+            continue
+        last_date = _ist_date(bars[-1]["t"])
+        agg = m.get("agg")
+        session_today = last_date == today
+        if session_today:
+            complete = bool(agg["complete"]) if agg is not None else now_min >= 15 * 60 + 25
+        else:
+            complete = True
+        if not session_today or complete:
+            phase = "FINAL"            # the close is in: the prediction is for the next session's open
+        elif now_min >= 15 * 60 + 10:
+            phase = "ENTRY WINDOW"     # 15:10-15:30: the setup is effectively known; act before the bell
+        else:
+            phase = "FORMING"          # intraday: provisional, it can still change
+        setup = res["setup"]
+        book = res["book"]
+        sure = bool(res["sure"]) or book["tier"] == "SURE"
+        if sure or book["tier"] == "HIGH":
+            status = "SURE" if sure else "HIGH"
+            head = "SURE" if sure else f"HIGH-CONFIDENCE {book['confidence']}%"
+            label = {"FINAL": f"{head} BUY (BTST) — exit at next open",
+                     "ENTRY WINDOW": f"{head} BUY (BTST) — enter before 15:30",
+                     "FORMING": f"{head} BUY (BTST) forming — confirm after 15:10"}[phase]
+        elif book["firedCount"] or setup:
+            status, label = "BLOCKED", "BTST setup — below the confidence bar"
+        else:
+            status, label = "NO SETUP", "NO BTST SETUP"
+        # the plan shown is the strategy book's when it issued the call, else the momentum-close gate's
+        plan = book["plan"] if book["plan"] else res["plan"]
+        if sure and not book["plan"] and res["plan"]:
+            plan = dict(res["plan"], tier="SURE", strategy="Momentum close (SURE gate)")
+        nxt = _btst_next_session(last_date)
+        src = "UPSTOX 5m->1D" if bars[-1].get("src") == "UPSTOX 5m->1D" else f"{m['src']} 1D"
+        led = [dict(t, id=iid, name=inst["name"]) for t in book["calls"]]
+        ledger.extend(led)
+        entry.update({
+            "status": status, "statusLabel": label, "phase": phase, "error": None,
+            "sessionDate": last_date.isoformat(), "isToday": session_today,
+            "sessionComplete": complete, "nextSession": nxt.isoformat(),
+            "dataSource": src, "bars": len(bars),
+            "prediction": res["prediction"], "setup": setup, "sure": sure,
+            "blockReasons": res["blockReasons"] if not (sure or book["tier"]) else [],
+            "plan": plan, "book": {k: v for k, v in book.items() if k not in ("calls", "table")},
+            "strategyTable": book["table"],
+            "audit": res["audit"], "sureStats": book["stats"]["ALL"],
+            "gateSureStats": res["sureStats"],
+            "recentPredictions": res["recentPredictions"],
+            "lastSure": led[-1] if led else None,
+        })
+        if status in ("SURE", "HIGH") and plan:
+            sure_calls.append({"id": iid, "name": inst["name"], "phase": phase, "plan": plan, "tier": status,
+                               "prediction": res["prediction"], "nextSession": nxt.isoformat()})
+
+    ledger.sort(key=lambda t: t["ts"], reverse=True)
+    cut, cut1 = time.time() - 730 * 86400, time.time() - 365 * 86400
+
+    def _pool(xs):
+        return dict(btst.tier_stats(xs), recent=btst.tier_stats([t for t in xs if t["ts"] >= cut]),
+                    lastYear=btst.tier_stats([t for t in xs if t["ts"] >= cut1]))
+
+    pooled = _pool(ledger)
+    pooled["tiers"] = {t: _pool([x for x in ledger if x["tier"] == t]) for t in ("SURE", "HIGH")}
+    ok = [s for s in segments if s["prediction"]]
+    as_of = max((s["sessionDate"] for s in ok), default=today.isoformat())
+    next_session = max((s["nextSession"] for s in ok), default=None)
+
+    if sure_calls:
+        names = ", ".join(f"{c['name']} ({c['tier']}, {c['plan'].get('strategy', 'momentum close')}, "
+                          f"confidence {c['plan'].get('confidence', c['plan'].get('measuredWinRate'))}%)"
+                          for c in sure_calls)
+        phase = sure_calls[0]["phase"]
+        verdict = (f"BTST for the {next_session} open: {names}. Entry is the {as_of} close"
+                   + (" (still forming — final after 15:10 IST)" if phase == "FORMING" else "")
+                   + "; exit at the next session's open. In the causal replay the BTST book's calls opened in "
+                     f"their favour {pooled['winRate']}% of the time over {pooled['samples']} calls (last 2 years "
+                     f"{pooled['recent']['winRate']}%, last year {pooled['lastYear']['winRate']}%). Calls on several "
+                     "indices the same evening are one market bet, not independent trades.")
+    elif ok:
+        ups = [s for s in ok if s["prediction"]["lean"] == "GAP-UP LEAN"]
+        downs = [s for s in ok if s["prediction"]["lean"] == "GAP-DOWN LEAN"]
+        blocked = [s for s in ok if s["status"] == "BLOCKED"]
+        verdict = (f"No BTST call (SURE or ≥{params['highConfidence']:.0f}% confidence) for the {next_session} open. "
+                   + ("Setups below the bar: " + "; ".join(
+                       f"{s['name']} — " + (s["blockReasons"][0] if s["blockReasons"] else
+                                            f"best strategy confidence {s['book']['confidence'] or '—'}%, model "
+                                            f"{round((s['prediction']['probUp'] or 0) * 100)}% gap-up")
+                       for s in blocked) + ". " if blocked else "")
+                   + (f"Gap-up lean: {', '.join(s['name'] for s in ups)}. " if ups else "")
+                   + (f"Gap-down lean: {', '.join(s['name'] for s in downs)}. " if downs else "")
+                   + ("" if ups or downs else "The model's measured odds are close to a coin flip on every index tonight. ")
+                   + "A lean is a probability, not a call — standing aside is the correct output.")
+    else:
+        verdict = ("No real daily history is available, so the BTST model has nothing to measure and invents "
+                   "nothing. Fix the Upstox token/feed and reopen.")
+    if any(s["phase"] == "FORMING" for s in ok):
+        verdict += " Today's bar is still forming; the setup is only final from 15:10 IST."
+
+    notes = []
+    if vix_note:
+        notes.append(vix_note)
+    for s in segments:
+        if s["status"] == "ERROR":
+            notes.append(f"{s['name']}: {s['error']}")
+        elif (s["dataSource"] or "").startswith("YAHOO"):
+            notes.append(f"{s['name']} daily history comes from Yahoo (labelled) because the Upstox pull failed.")
+
+    return {
+        "generatedAt": int(time.time()),
+        "istClock": time.strftime("%Y-%m-%d %H:%M:%S", ist_now()),
+        "marketOpen": market_open(),
+        "asOfDate": as_of,
+        "nextSession": next_session,
+        "verdict": verdict,
+        "rule": btst.rule_text(),
+        "params": {k: params[k] for k in ("bodyMin", "breadthMin", "minSamples", "sureWinRate",
+                                          "sureRecentWinRate", "modelAgreeLong", "modelAgreeShort",
+                                          "leanProb", "sureConfidence", "highConfidence", "highModelMin",
+                                          "stratMinSamples")},
+        "strategies": [{"key": x["key"], "name": x["name"], "text": x["text"]}
+                       for x in btst.STRATEGIES + [btst.CONFLUENCE]],
+        "sureCalls": sure_calls,
+        "segments": segments,
+        "sureStats": pooled,
+        "sureLedger": ledger[:60],
+        "fullLedger": ledger,
+        "notes": notes,
+        "method": {
+            "predicts": "The direction of the next session's OPEN versus today's close, for every index. "
+                        "Win = the next open is beyond the entry in the call's direction.",
+            "setup": btst.rule_text(),
+            "strategies": "Six BTST strategies, each kept only because it held in all four eras 2015-18, 2019-21, "
+                          "2022-24 and 2025-26: momentum close + VIX easing, gap-down recovered, strong close + "
+                          "breadth + VIX easing, breakout close, 3-day trend + strong close, high-VIX strong close; "
+                          "plus confluence (3+ agree).",
+            "confidence": (f"Confidence = the lowest of the strategy's shrunk win rate on this index over all history, "
+                           f"the last ~2 years and the last ~1 year (each pulled toward 50% by 10 imaginary coin-flip "
+                           f"trades, ≥ {params['stratMinSamples']} past setups required). The best firing strategy sets "
+                           f"the evening's confidence."),
+            "gate": (f"SURE = confidence ≥ {params['sureConfidence']:.0f}% and model gap-up probability ≥ "
+                     f"{params['modelAgreeLong'] * 100:.0f}% (or the original momentum-close SURE gate). "
+                     f"HIGH-CONFIDENCE = confidence ≥ {params['highConfidence']:.0f}% and model ≥ "
+                     f"{params['highModelMin'] * 100:.0f}%. Anything lower is shown as a lean only."),
+            "model": "Ridge linear-probability model on 11 close-of-day features (close location, body, return, "
+                     "RSI, distance from 20-day average, India VIX change, recent gap-up share, breadth, today's "
+                     "gap, 5-day return, weekend), refitted every 21 sessions on the previous ~4 years. The "
+                     "probability shown is what that score bucket actually did out of sample.",
+            "noLookahead": "Features at day i use bars up to i only; a day's outcome enters training only after "
+                           "the next open is known. The SURE track record is a causal replay: each day's gate "
+                           "sees only setups resolved before that evening.",
+            "shortSide": "Six STBT (gap-down) strategies were tested the same way — weak close, breakdown with VIX "
+                         "up, overbought fade, shooting star, VIX spike, trend collapse — and all won only 30-48%: "
+                         "Indian indices gap up after weak days more often than not. The book has no short strategy "
+                         "rather than one that loses.",
+            "risk": "There is no stop overnight: the worst measured gap against a call is shown on every card. "
+                    "Size positions so that worst gap is survivable.",
+            "costs": "All figures are gross index points before brokerage, taxes, slippage and option decay.",
+            "separate": "This page's model is independent of the intraday sure-call engine, the confidence "
+                        "calls, the short-term book and the overnight close-to-close model; none of them read "
+                        "or change it.",
+        },
+    }
+
+
+def _btst_csv(res):
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["date", "next_date", "segment", "side", "tier", "confidence", "strategy", "strategies_fired",
+                "entry_close", "next_open", "points", "pct", "win", "model_prob_up", "body_atr", "breadth", "vix_pct"])
+    for t in res.get("sureLedger") or []:
+        w.writerow([t["date"], t["nextDate"], t["id"], t["side"], t["tier"], t["confidence"], t["strategy"],
+                    "+".join(t["strategies"]), t["entry"], t["nextOpen"], t["pts"], t["pct"], int(t["win"]),
+                    t["prob"], t["body"], t["breadth"], t["vixPct"]])
+    return out.getvalue()
+
+
 def _expiries(chain_key):
     return cached(f"exp:{chain_key}", 1800, lambda: UX.expiries(chain_key))
 
@@ -2231,6 +2570,20 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, json.dumps(res).encode("utf-8"),
                                "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+            return
+
+        if parsed.path == "/api/btst":
+            try:
+                res = build_btst()
+                if qs.get("format", ["json"])[0] == "csv":
+                    self._send(200, _btst_csv(dict(res, sureLedger=res["fullLedger"])).encode("utf-8"),
+                               "text/csv; charset=utf-8",
+                               {"Content-Disposition": 'attachment; filename="btst-sure-calls.csv"'})
+                else:
+                    body = {k: v for k, v in res.items() if k != "fullLedger"}
+                    self._send(200, json.dumps(body).encode("utf-8"), "application/json; charset=utf-8")
             except Exception as exc:
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return

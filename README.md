@@ -308,6 +308,31 @@ Daily bars come from Upstox (~3 years). Until Upstox publishes today's EOD bar, 
 aggregated from the real Upstox 5m series and labelled `UPSTOX 5m->1D`; Yahoo daily is a labelled
 fallback where a symbol exists. **Download signals CSV** exports the audited ledger.
 
+## BTST — next-session open prediction
+
+Shown at the end of the **Next-day · BTST** page (`btst.py`, `GET /api/btst`). A separate model: it does not read or
+change the intraday sure calls, the confidence calls, the short-term book or the overnight model.
+
+- **Predicts** the direction of the next session's OPEN versus today's close for each index segment, with the
+  out-of-sample measured gap-up rate for similar evenings, a predicted open and a typical zone.
+- **Six BTST strategies** (long only, fixed round thresholds, each kept because it held in all four eras 2015-18,
+  2019-21, 2022-24, 2025-26): momentum close + VIX easing, gap-down recovered, strong close + breadth + VIX easing,
+  breakout close, 3-day trend + strong close, high-VIX strong close; plus confluence (3+ agree).
+- **Confidence** = the lowest of the firing strategy's shrunk win rate on that index over all history, the last ~2
+  years and the last ~1 year (shrunk toward 50% by 10 imaginary coin-flip trades; ≥ 25 past setups required).
+- **Call tiers:** SURE = confidence ≥ 70% and the walk-forward model gives ≥ 60% gap-up (or the original
+  momentum-close SURE gate); HIGH-CONFIDENCE = confidence ≥ 60% and model ≥ 60%. Anything lower is a lean only.
+- **Measured (causal replay, gross, Nifty/Sensex/Bank Nifty/Fin Nifty):** 2,012 calls, 74.1% opened in favour;
+  70.8% since 2023, 68.1% since 2025, 66.3% in 2026. Per index last year: Nifty 73%, Fin Nifty 67%, Sensex 61%,
+  Bank Nifty 50% (weakest — treat its calls with care).
+- **No STBT:** six gap-down strategies were tested the same way and all won only 30-48% — Indian indices gap up after
+  weak days more often than not — so there are no short calls.
+- **Timing:** FORMING before 15:10 IST, ENTRY WINDOW 15:10–15:30, FINAL after the close. Exit at the next open.
+  No overnight stop: every card shows the worst gap seen.
+- **Data:** ~10 years of Upstox daily bars (Yahoo fallback); sessions missing from the EOD history are aggregated
+  from real Upstox 5m bars and labelled `UPSTOX 5m->1D`. `python test_btst.py` checks the tiers, the ≥ 60% replay
+  and that removing future bars changes no earlier feature, probability or call.
+
 ## Nifty 50 stock book — breadth plus audited per-stock calls
 
 The **Nifty 50** button opens the whole index, not just the index future: all 50 constituents with a
@@ -405,6 +430,7 @@ and in total, plus the most recent calls and a CSV ledger.
 - `GET /api/research?segments=ID1,ID2` — scan report (omit `segments` for all six call-enabled)
 - `GET /api/proof` — provenance + per-segment walk-forward audits behind the Proof panel
 - `GET /api/today` — today's calls replayed through the live gates, with session and per-segment stats
+- `GET /api/btst` — BTST next-open predictions, SURE / HIGH calls and the causal track record; `?format=csv` returns every replayed call
 - `GET /api/overnight` — next-day model audit, live signals and plans; `?format=csv&days=365` returns
   the full audited signal ledger as CSV
 - `GET /api/nifty50` — all 50 constituents: live quote, breadth, own 180-day audit, status/plan;
@@ -445,6 +471,7 @@ gross of costs — a weak close followed by a large gap down is the risk it does
 - `upstox.py` — Upstox v2/v3 client (quotes, candles, option contracts, chain → OI/Greeks)
 - `upstox_login.py` — OAuth code exchange, rewrites the token in `.env`
 - `analysis.py` — indicators, option analytics, composite signal, move forecast, walk-forward audits, session replay
+- `btst.py` — BTST next-open model: six strategies, confidence tiers, walk-forward probability and causal replay
 - `overnight.py` — next-day oversold model: signal, no-lookahead ledger, audit and live plan
 - `nifty50.py` — Nifty 50 constituents, breadth, background 180-day per-stock audit and gate
 - `research_opt.py` — offline six-month profile search (stop width × horizon × filters, monthly folds)

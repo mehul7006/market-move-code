@@ -2090,6 +2090,241 @@ function renderOvernight(o) {
   $("overnightCloseBtn").onclick = closeOvernight;
 }
 
+/* ------------------------------------------------------------------ BTST next-open prediction */
+/* Separate model (btst.py, /api/btst). It renders into its own container at the end of the
+   Next-day page and never touches the overnight renderer above or any intraday call logic. */
+
+let btstTimer = null;
+
+function loadBtst() {
+  const body = $("btstBody");
+  if (!body) return;
+  if (!body.innerHTML.trim()) {
+    body.innerHTML = `<div class="bt-wrap"><div class="loading"><span class="spinner"></span>
+      Training the BTST next-open model on ~10 years of daily bars…</div></div>`;
+  }
+  fetch("/api/btst")
+    .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(renderBtst)
+    .catch((e) => {
+      body.innerHTML = `<div class="bt-wrap"><div class="error-state"><div class="big">BTST MODEL UNAVAILABLE</div>
+        <div class="why">${esc(e.message)}</div>
+        <div class="fix">The BTST page needs real daily bars from Upstox (or Yahoo where a symbol exists).
+          It never invents data — if the feed fails, this error is the output.</div></div></div>`;
+    });
+  clearTimeout(btstTimer);
+  // refresh while the page is open during the session / entry window
+  btstTimer = setTimeout(() => {
+    if (!$("overnightModal").classList.contains("hidden")) loadBtst();
+  }, 60000);
+}
+
+function btstCard(s) {
+  const pc = (v) => (v == null ? "—" : v + "%");
+  const sg = (v) => (v == null ? "—" : (v >= 0 ? "+" : "") + v);
+  if (s.status === "ERROR" || !s.prediction) {
+    return `<div class="on-card on-err"><div class="on-head"><div><div class="on-name">${esc(s.name)}</div></div>
+      <span class="on-status err">FEED ERROR</span></div><div class="on-err">${esc(s.error || "no data")}</div></div>`;
+  }
+  const p = s.prediction, plan = s.plan, ss = s.sureStats || {};
+  const dir = p.direction === "UP" ? "up" : p.direction === "DOWN" ? "down" : "flat";
+  const strong = p.lean === "GAP-UP LEAN" || p.lean === "GAP-DOWN LEAN";
+  const arrow = !strong ? "≈" : dir === "up" ? "▲" : "▼";
+  const mu = p.measuredUpRate;
+  const isSure = s.status === "SURE";
+  const cardCls = isSure ? "on-sure" : s.status === "HIGH" ? "on-call" : s.status === "BLOCKED" ? "on-blocked" : "";
+  const stCls = isSure || s.status === "HIGH" ? "call" : s.status === "BLOCKED" ? "blocked" : "none";
+  let callBlock = "";
+  const book = s.book || {};
+  if (plan) {
+    const tier = plan.tier || (isSure ? "SURE" : "");
+    const isCall = s.status === "SURE" || s.status === "HIGH";
+    callBlock = `
+      <div class="on-side">▲ ${esc(plan.action)}
+        ${isCall ? `<span class="on-grade ${tier === "SURE" ? "gA" : ""}">${esc(tier === "SURE" ? "SURE" : "HIGH-CONFIDENCE")}</span>` : `<span class="on-grade">BELOW THE BAR</span>`}
+        ${plan.confidence != null ? `<span class="on-grade">${plan.confidence}% confidence</span>` : ""}</div>
+      <div class="on-now">Strategy: <b>${esc(plan.strategy || "Momentum close")}</b></div>
+      <div class="on-plan">
+        <div><span>Entry</span><b>${fmt(plan.entry)}</b><div class="fcs">${esc(plan.entryDate)} close</div></div>
+        <div><span>Exit</span><b>next open</b><div class="fcs">${esc(s.nextSession || "")} 09:15–09:20</div></div>
+        <div><span>Avg winning gap</span><b class="pos">${fmt(plan.target)}</b><div class="fcs">${sg(plan.targetPts)} pts</div></div>
+        <div><span>Tier hit rate</span><b class="${(plan.measuredWinRate ?? 0) >= 65 ? "pos" : "neg"}">${pc(plan.measuredWinRate)}</b><div class="fcs">${plan.measuredSamples ?? 0} calls</div></div>
+        <div><span>Last ~2 yrs</span><b>${pc(plan.recentWinRate)}</b><div class="fcs">${plan.recentSamples ?? 0} calls</div></div>
+        <div><span>Worst gap seen</span><b class="neg">${sg(plan.worstPts)}</b><div class="fcs">no overnight stop</div></div>
+      </div>
+      ${s.blockReasons && s.blockReasons.length ? `<div class="on-err">Not sure: ${s.blockReasons.map(esc).join(" · ")}</div>` : ""}`;
+  } else if (s.status === "BLOCKED") {
+    callBlock = `<div class="on-err">BTST setup fired but below the bar: best confidence
+      ${book.confidence == null ? "not measurable yet" : book.confidence + "%"} (needs ≥ 60%) ·
+      model ${p.probUp == null ? "—" : Math.round(p.probUp * 100) + "%"} gap-up (needs ≥ 60%)</div>`;
+  }
+  const strat = (book.strategies || []).map((x) => `<li class="${x.fired ? "ok" : ""}">${esc(x.name)}
+      <span class="fcs">${x.fired ? (x.confidence == null ? "fired · too few samples" : `fired · confidence ${x.confidence}%`) : `${pc(x.allWinRate)} over ${x.allSamples}`}</span></li>`).join("");
+  const showConds = `<ul class="bt-conds">${strat}</ul>`;
+  const last = s.lastSure;
+  return `<div class="on-card ${cardCls}">
+    <div class="on-head">
+      <div>
+        <div class="on-name">${esc(s.name)}<span class="bt-phase">${esc(s.phase || "")}</span></div>
+        <div class="on-sub">${esc(s.sessionDate)} close ${fmt(p.close)} → ${esc(s.nextSession)} open · ${esc(s.dataSource)}</div>
+      </div>
+      <span class="on-status ${stCls}">${esc(s.statusLabel)}</span>
+    </div>
+    <div class="bt-pred">
+      <div class="bt-arrow ${strong ? dir : "flat"}">${arrow}</div>
+      <div>
+        <div class="bt-lean ${strong ? dir : "flat"}">${esc(p.lean)}</div>
+        <div class="on-now">Next open higher: <b>${pc(mu)}</b>
+          <span class="fcs">measured on ${p.bucketN} similar evenings (${esc(p.calibratedOn || "—")})</span></div>
+        ${mu != null ? `<div class="bt-meter" title="measured gap-up rate"><i style="width:${Math.max(0, Math.min(100, mu))}%"></i></div>` : ""}
+      </div>
+    </div>
+    <div class="on-now">Predicted open <b>${fmt(p.predictedOpen)}</b>
+      <span class="fcs">(${sg(p.expectedGapPts)} pts)</span> · zone <b>${fmt(p.zoneLow)}–${fmt(p.zoneHigh)}</b>
+      · body <b>${sg(p.body)}×ATR</b> · breadth <b>${sg(p.breadth)}</b>
+      · VIX <b>${p.vixPct == null ? "—" : sg(p.vixPct) + "%"}</b></div>
+    ${callBlock}
+    ${showConds}
+    <div class="on-audit">
+      <span>BTST calls <b class="${(ss.winRate ?? 0) >= 65 ? "pos" : "neg"}">${pc(ss.winRate)}</b> · ${ss.samples ?? 0}</span>
+      <span>last 2 yrs ${pc((ss.recent || {}).winRate)} · ${(ss.recent || {}).samples ?? 0}</span>
+      <span>last yr ${pc((ss.lastYear || {}).winRate)} · ${(ss.lastYear || {}).samples ?? 0}</span>
+      <span>avg ${sg(ss.avgPts)} pts · PF ${ss.profitFactor ?? "—"}</span>
+      ${last ? `<span>last call ${esc(last.date)} ${last.win ? '<b class="pos">WIN</b>' : '<b class="neg">LOSS</b>'} ${sg(last.pts)}</span>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderBtst(o) {
+  const pc = (v) => (v == null ? "—" : v + "%");
+  const sg = (v) => (v == null ? "—" : (v >= 0 ? "+" : "") + v);
+  const segs = o.segments || [];
+  const st = o.sureStats || {}, rc = st.recent || {};
+  const calls = o.sureCalls || [];
+  const tiers = st.tiers || {};
+  const ledger = (o.sureLedger || []).slice(0, 40).map((t) => `<tr>
+      <td class="num">${esc((t.date || "").slice(2))}<div class="fcs">→ ${esc((t.nextDate || "").slice(5))}</div></td>
+      <td class="name">${esc(t.name)}</td>
+      <td><span class="on-grade ${t.tier === "SURE" ? "gA" : ""}">${esc(t.tier)}</span> <span class="fcs">${t.confidence}%</span></td>
+      <td class="name">${esc(t.strategyName)}${t.strategies.length > 1 ? ` <span class="fcs">+${t.strategies.length - 1}</span>` : ""}</td>
+      <td class="num">${fmt(t.entry)}</td>
+      <td class="num">${fmt(t.nextOpen)}</td>
+      <td class="num ${t.pts >= 0 ? "pos" : "neg"}">${sg(t.pts)}</td>
+      <td class="num ${t.pct >= 0 ? "pos" : "neg"}">${sg(t.pct)}%</td>
+      <td>${t.win ? '<span class="pf-out pf-t1">WIN</span>' : '<span class="pf-out pf-stop">LOSS</span>'}</td>
+    </tr>`).join("");
+  // strategy x index win rates (all history / last ~2 years)
+  const traded = segs.filter((s) => s.strategyTable);
+  const stratRows = (o.strategies || []).map((x) => `<tr>
+      <td class="name"><b>${esc(x.name)}</b><div class="fcs">${esc(x.text)}</div></td>
+      ${traded.map((s) => {
+        const r = s.strategyTable.find((y) => y.key === x.key) || {};
+        return `<td class="num ${(r.winRate ?? 0) >= 65 ? "pos" : (r.winRate ?? 0) >= 60 ? "" : "neg"}">${pc(r.winRate)}
+          <div class="fcs">${r.samples ?? 0} · 2y ${pc(r.recentWinRate)}</div></td>`;
+      }).join("")}
+    </tr>`).join("");
+  const tierRow = (label, t) => `<tr><td class="name"><b>${label}</b></td>
+      <td class="num">${t.samples ?? 0}</td>
+      <td class="num ${(t.winRate ?? 0) >= 65 ? "pos" : "neg"}"><b>${pc(t.winRate)}</b></td>
+      <td class="num">${pc((t.recent || {}).winRate)} <span class="fcs">${(t.recent || {}).samples ?? 0}</span></td>
+      <td class="num">${pc((t.lastYear || {}).winRate)} <span class="fcs">${(t.lastYear || {}).samples ?? 0}</span></td>
+      <td class="num ${(t.avgPts ?? 0) >= 0 ? "pos" : "neg"}">${sg(t.avgPts)}</td>
+      <td class="num">${t.profitFactor ?? "—"}</td>
+      <td class="num neg">${sg(t.worstPts)}</td></tr>`;
+  const segRows = traded.map((s) => {
+    const b = (s.book || {}).stats || {}, a = s.audit;
+    const cell = (t) => `${pc((t || {}).winRate)} <span class="fcs">${(t || {}).samples ?? 0}</span>`;
+    return `<tr>
+      <td class="name">${esc(s.name)}</td>
+      <td class="num">${pc(a.baseUpRate)} / ${pc(a.recentBaseUpRate)}</td>
+      <td class="num">${cell(b.SURE)}</td>
+      <td class="num">${cell(b.HIGH)}</td>
+      <td class="num ${((b.ALL || {}).winRate ?? 0) >= 65 ? "pos" : "neg"}"><b>${cell(b.ALL)}</b></td>
+      <td class="num">${cell((b.ALL || {}).lastYear)}</td>
+      <td class="num">${pc(a.model.directionHit)}</td>
+    </tr>`;
+  }).join("");
+  const method = Object.entries(o.method || {}).map(([k, v]) => {
+    const label = { predicts: "Predicts", setup: "Momentum gate", strategies: "Strategies",
+      confidence: "Confidence", gate: "Call tiers", model: "Model",
+      noLookahead: "No look-ahead", shortSide: "Short side", risk: "Risk", costs: "Costs",
+      separate: "Separate" }[k] || k;
+    return `<li><b>${esc(label)}:</b> ${esc(v)}</li>`;
+  }).join("");
+
+  $("btstBody").innerHTML = `<div class="bt-wrap">
+    <h2 class="bt-title">BTST — next-session open prediction</h2>
+    <p class="bt-sub">A separate model from everything above. For each index it predicts whether the
+      ${esc(o.nextSession || "next")} open will be above or below the ${esc(o.asOfDate)} close, and prints a
+      BTST call only when one of six measured strategies fires with <b>SURE (≥ 70%)</b> or <b>HIGH (≥ 60%)</b>
+      confidence and the probability model agrees.
+      Exit is the next open. The intraday sure calls and the overnight model are unchanged.</p>
+    <div class="verdict">
+      <div class="vh">BTST · as of ${esc(o.asOfDate)} → ${esc(o.nextSession || "—")} open · snapshot ${esc(o.istClock)} IST</div>
+      ${esc(o.verdict)}
+    </div>
+    ${calls.length ? `<div class="proof-card"><div class="pf-h">Tonight — ${calls.length} BTST call${calls.length === 1 ? "" : "s"}</div>
+      <div class="pf-note">${calls.map((c) => `<b>${esc(c.name)}</b> · <b>${esc(c.tier)}</b>${c.plan.confidence != null ? ` ${c.plan.confidence}%` : ""}: ${esc(c.plan.action)} at ${fmt(c.plan.entry)}, exit at the ${esc(c.nextSession)} open
+        — ${esc(c.plan.strategy || "momentum close")}, tier measured ${pc(c.plan.measuredWinRate)} over ${c.plan.measuredSamples} calls, worst gap ${sg(c.plan.worstPts)} pts`).join("<br>")}</div></div>` : ""}
+    <div class="on-grid">${segs.map(btstCard).join("")}</div>
+    <div class="proof-card">
+      <div class="pf-h">BTST call track record — causal replay
+        <span class="fc-badge">entry at close · exit at next open · gross points</span></div>
+      <div class="pf-stats">
+        <div><span>All BTST calls</span><b>${st.samples ?? 0}</b><div class="fcs">six indices</div></div>
+        <div><span>Opened in favour</span><b class="${(st.winRate ?? 0) >= 65 ? "pos" : "neg"}">${pc(st.winRate)}</b></div>
+        <div><span>Last 2 years</span><b class="${(rc.winRate ?? 0) >= 60 ? "pos" : "neg"}">${pc(rc.winRate)}</b><div class="fcs">${rc.samples ?? 0} calls</div></div>
+        <div><span>Last year</span><b class="${((st.lastYear || {}).winRate ?? 0) >= 60 ? "pos" : "neg"}">${pc((st.lastYear || {}).winRate)}</b><div class="fcs">${(st.lastYear || {}).samples ?? 0} calls</div></div>
+        <div><span>Avg gap / call</span><b class="${(st.avgPts ?? 0) >= 0 ? "pos" : "neg"}">${sg(st.avgPts)} pts</b><div class="fcs">${sg(st.avgPct)}%</div></div>
+        <div><span>Profit factor</span><b>${st.profitFactor ?? "—"}</b></div>
+        <div><span>Worst gap</span><b class="neg">${sg(st.worstPts)} pts</b></div>
+        <div><span>Traded beyond entry</span><b>${pc(st.touchRate)}</b><div class="fcs">next session, any time</div></div>
+      </div>
+      <div class="table-wrap"><table class="research pf-table">
+        <thead><tr><th>Tier</th><th>Calls</th><th>Hit</th><th>Last 2 yrs</th><th>Last year</th><th>Avg pts</th><th>PF</th><th>Worst</th></tr></thead>
+        <tbody>${tierRow("SURE (≥ 70% confidence)", tiers.SURE || {})}${tierRow("HIGH-CONFIDENCE (≥ 60%)", tiers.HIGH || {})}${tierRow("All BTST calls", st)}</tbody>
+      </table></div>
+      <div class="pf-note">Each past evening is judged only on setups already resolved by that evening, exactly as the
+        live gate sees them — not a curve-fitted in-sample number. Calls on several indices the same evening are one
+        market bet, not independent trades.</div>
+      <div class="table-wrap" style="max-height:42vh;overflow:auto"><table class="research pf-table">
+        <thead><tr><th>Date → open</th><th>Index</th><th>Tier</th><th>Strategy</th><th>Entry</th><th>Next open</th>
+          <th>Pts</th><th>%</th><th>Result</th></tr></thead>
+        <tbody>${ledger || `<tr><td colspan="9" class="num">No BTST calls in the history.</td></tr>`}</tbody>
+      </table></div>
+    </div>
+    <div class="proof-card">
+      <div class="pf-h">By index — BTST calls vs simply opening higher</div>
+      <div class="table-wrap"><table class="research pf-table">
+        <thead><tr><th>Index</th><th>Gap-up base (all / 2y)</th><th>SURE</th><th>HIGH</th><th>All calls</th>
+          <th>Last year</th><th>Model direction hit</th></tr></thead>
+        <tbody>${segRows}</tbody></table></div>
+      <div class="pf-note">A call is only useful when it clearly beats the base column (how often the index opened
+        higher anyway).</div>
+    </div>
+    <div class="proof-card">
+      <div class="pf-h">The six BTST strategies — next open higher, by index</div>
+      <div class="table-wrap"><table class="research pf-table">
+        <thead><tr><th>Strategy</th>${traded.map((s) => `<th>${esc(s.name)}</th>`).join("")}</tr></thead>
+        <tbody>${stratRows}</tbody></table></div>
+      <div class="pf-note">All resolved setups since 2015 (Midcap Select since 2022); small text = setups and the last
+        ~2 years. Six gap-down (STBT) strategies were tested the same way and all lost (30–48%), so there are no STBT
+        calls.</div>
+      ${(o.notes || []).length ? `<div class="on-note">${o.notes.map(esc).join("<br>")}</div>` : ""}
+      <div class="modal-actions">
+        <a class="btn" href="/api/btst?format=csv">Download all BTST calls CSV</a>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="btstReload">Reload BTST</button>
+      </div>
+    </div>
+    <div class="proof-card">
+      <div class="pf-h">How the BTST prediction works</div>
+      <ul class="pf-method">${method}</ul>
+    </div>
+  </div>`;
+  $("btstReload").onclick = loadBtst;
+}
+
 /* ------------------------------------------------------------------ Nifty 50 stock book */
 
 const n5State = { data: null, filter: "ALL", timer: null };
@@ -2704,6 +2939,7 @@ $("todayBtn").addEventListener("click", openToday);
 $("todayClose").addEventListener("click", closeToday);
 $("todayModal").addEventListener("click", (e) => { if (e.target.id === "todayModal") closeToday(); });
 $("overnightBtn").addEventListener("click", openOvernight);
+$("overnightBtn").addEventListener("click", loadBtst);
 $("overnightClose").addEventListener("click", closeOvernight);
 $("overnightModal").addEventListener("click", (e) => { if (e.target.id === "overnightModal") closeOvernight(); });
 $("niftyBtn").addEventListener("click", openNifty);

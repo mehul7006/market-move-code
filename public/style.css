@@ -462,6 +462,26 @@ table.research { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 @media (max-width: 900px) { .on-grid { grid-template-columns: 1fr; }
   .on-plan { grid-template-columns: repeat(2, 1fr); } }
 
+/* ---------- BTST next-open prediction (separate model) ---------- */
+.bt-wrap { border-top: 2px dashed rgba(148,163,184,.22); margin-top: 18px; padding-top: 16px; }
+.bt-title { font-size: 17px; font-weight: 800; margin: 0 0 4px; }
+.bt-sub { font-size: 11.5px; color: var(--muted); margin: 0 0 12px; line-height: 1.55; }
+.on-card.on-sure { border-top-color: var(--bull); background: linear-gradient(180deg, rgba(34,197,94,.10), rgba(15,23,42,.5));
+  box-shadow: 0 0 0 1px rgba(34,197,94,.25) inset; }
+.on-card.on-sure-short { border-top-color: var(--bear); background: linear-gradient(180deg, rgba(239,68,68,.10), rgba(15,23,42,.5)); }
+.bt-pred { display: flex; align-items: center; gap: 12px; margin-bottom: 9px; }
+.bt-arrow { font-size: 26px; font-weight: 900; line-height: 1; width: 34px; text-align: center; }
+.bt-arrow.up { color: var(--bull); } .bt-arrow.down { color: var(--bear); } .bt-arrow.flat { color: var(--muted); }
+.bt-lean { font-size: 13px; font-weight: 800; }
+.bt-lean.up { color: var(--bull); } .bt-lean.down { color: var(--bear); } .bt-lean.flat { color: var(--muted); }
+.bt-meter { height: 6px; border-radius: 4px; background: rgba(239,68,68,.35); overflow: hidden; margin-top: 5px; width: 180px; max-width: 100%; }
+.bt-meter > i { display: block; height: 100%; background: var(--bull); }
+.bt-conds { list-style: none; padding: 0; margin: 6px 0 0; font-size: 11px; color: var(--muted); line-height: 1.6; }
+.bt-conds li::before { content: "✕ "; color: var(--bear); font-weight: 800; }
+.bt-conds li.ok::before { content: "✓ "; color: var(--bull); }
+.bt-phase { font-family: var(--mono); font-size: 9.5px; color: var(--accent); margin-left: 6px; }
+@media (max-width: 640px) { .bt-meter { width: 120px; } }
+
 /* ---------- Nifty 50 stock book ---------- */
 .modal-wide { width: min(1280px, 100%); }
 .n5-hero { display: grid; grid-template-columns: 1.7fr 1fr; gap: 12px; margin-bottom: 12px; }
