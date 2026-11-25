@@ -430,6 +430,7 @@ and in total, plus the most recent calls and a CSV ledger.
 - `GET /api/research?segments=ID1,ID2` — scan report (omit `segments` for all six call-enabled)
 - `GET /api/proof` — provenance + per-segment walk-forward audits behind the Proof panel
 - `GET /api/today` — today's calls replayed through the live gates, with session and per-segment stats
+- `GET /api/call-confidence` — read-only: the measured win rate behind each kind of call (sure, confidence, desk profile), shown as the Confidence chip next to every generated call; it never changes which calls are generated
 - `GET /api/btst` — BTST next-open predictions, SURE / HIGH calls and the causal track record; `?format=csv` returns every replayed call
 - `GET /api/overnight` — next-day model audit, live signals and plans; `?format=csv&days=365` returns
   the full audited signal ledger as CSV

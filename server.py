@@ -1765,6 +1765,65 @@ def _build_btst():
     }
 
 
+# ---------------------------------------------------------------- call confidence (display only)
+# Read-only: reports the win rate each kind of call was MEASURED at, so the page can show a confidence level next
+# to every generated call. Nothing here is read by, or changes, any call-generation logic.
+
+_conf_files = {"mtime": None, "data": None}
+
+
+def _model_oos():
+    """Out-of-sample win rates stored in strict_model.json (sure calls) and conf_model.json (confidence calls)."""
+    paths = [os.path.join(ROOT, "strict_model.json"), os.path.join(ROOT, "conf_model.json")]
+    try:
+        mt = tuple(os.path.getmtime(x) for x in paths)
+    except OSError:
+        mt = None
+    if _conf_files["mtime"] != mt or _conf_files["data"] is None:
+        out = {"sure": {}, "conf": {}}
+        for key, path in zip(("sure", "conf"), paths):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    m = json.load(fh)
+            except Exception:
+                continue
+            for seg, v in m.items():
+                o = (v or {}).get("outOfSample") or {}
+                if o.get("winRate") is None:
+                    continue
+                row = {"winRate": o.get("winRate"), "calls": o.get("calls"),
+                       "trainedThrough": v.get("trainedThrough")}
+                for g in ("gradeA", "gradeB"):
+                    if (o.get(g) or {}).get("calls"):
+                        row[g] = {"winRate": o[g]["winRate"], "calls": o[g]["calls"]}
+                out[key][seg] = row
+        _conf_files.update(mtime=mt, data=out)
+    return _conf_files["data"]
+
+
+def build_call_confidence():
+    data = _model_oos()
+    desk = {}
+    try:
+        mk = _payload.get("data") or {}
+        for it in mk.get("instruments") or []:
+            f = it.get("forecast") or {}
+            if it.get("tradeable") and f.get("auditWinRate") is not None:
+                desk[it["id"]] = {"winRate": f.get("auditWinRate"), "calls": f.get("auditSamples"),
+                                  "profile": f.get("profile")}
+    except Exception:
+        pass
+    return {
+        "sure": data["sure"], "conf": data["conf"], "desk": desk,
+        "basis": {
+            "sure": "Sure call: out-of-sample T1-before-stop win rate of the sure-call model on that index "
+                    "(trained only on earlier data, tested on the following 3 x 30 days).",
+            "conf": "Confidence call: out-of-sample win rate of the confidence-tier model on that index.",
+            "desk": "Desk / long-term call: the profile's own six-month T1-before-stop audit on that index.",
+        },
+    }
+
+
 def _btst_csv(res):
     out = io.StringIO()
     w = csv.writer(out)
@@ -2570,6 +2629,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, json.dumps(res).encode("utf-8"),
                                "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+            return
+
+        if parsed.path == "/api/call-confidence":
+            try:
+                self._send(200, json.dumps(build_call_confidence()).encode("utf-8"),
+                           "application/json; charset=utf-8")
             except Exception as exc:
                 self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
             return

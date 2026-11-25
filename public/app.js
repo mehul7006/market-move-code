@@ -16,6 +16,40 @@ const fmt = (n) => n == null ? "—" : Number(n).toLocaleString("en-IN", { minim
 const fmtPct = (n) => n == null ? "—" : `${n > 0 ? "+" : ""}${n.toFixed(2)}%`;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+/* Confidence shown next to every generated call (display only). It is the win rate each kind of call was
+   MEASURED at on that index (/api/call-confidence reads it from the trained models and the desk audit); it never
+   changes which calls are generated. */
+let CALLCONF = null;
+function loadCallConfidence() {
+  return fetch("/api/call-confidence").then((r) => (r.ok ? r.json() : null))
+    .then((d) => { if (d) CALLCONF = d; }).catch(() => {});
+}
+function callConfidence(n) {
+  const c = CALLCONF || {};
+  const seg = n.seg || n.segment || n.id;
+  if (n.why || n.tier === "60") {
+    const m = (c.conf || {})[seg];
+    const pct = n.prob ? Math.round(n.prob * 1000) / 10 : m ? m.winRate : null;
+    return { pct, n: m ? m.calls : null, kind: "Confidence call", basis: (c.basis || {}).conf };
+  }
+  if (n.term === "long" || n.kind === "desk") {
+    const m = (c.desk || {})[seg];
+    return { pct: m ? m.winRate : null, n: m ? m.calls : null, kind: "Desk profile", basis: (c.basis || {}).desk };
+  }
+  const m = (c.sure || {})[seg];
+  const g = m ? (n.grade === "B" ? m.gradeB : m.gradeA) || (n.grade === "B" ? null : m) : null;
+  return { pct: g ? g.winRate : null, n: g ? g.calls : null, kind: n.grade === "B" ? "Sure call · B tier" : "Sure call",
+    basis: (c.basis || {}).sure };
+}
+function confLevelCls(pct) {
+  return pct == null ? "cf-na" : pct >= 70 ? "cf-hi" : pct >= 60 ? "cf-mid" : "cf-lo";
+}
+function confChip(c, small) {
+  const pct = c ? c.pct : null;
+  const tip = c && c.basis ? `${c.kind}: ${c.basis}${c.n ? " (" + c.n + " calls)" : ""}` : "measured confidence";
+  return `<span class="cf-chip ${confLevelCls(pct)}${small ? " cf-sm" : ""}" title="${esc(tip)}">${pct == null ? "conf —" : "Confidence " + pct + "%"}</span>`;
+}
+
 function fmtCompact(n) {
   if (n == null) return "—";
   const a = Math.abs(n);
@@ -352,6 +386,8 @@ function renderSignal(inst) {
     <div class="card-head"><h3>Final signal — ${esc(inst.name)}</h3>
       <div style="display:flex;gap:6px"><span class="chip chip-tf">${s.timeframe}</span></div></div>
     <span class="dir-pill dir-${s.direction}">${s.direction} · ${dirWord}</span>
+    ${measured != null ? confChip({ pct: measured, n: f.auditSamples, kind: "Desk profile",
+      basis: "this profile's own six-month T1-before-stop audit on " + inst.name }) : ""}
     <div class="conf-block">
       <div class="conf-head"><span>Aggregate conviction</span><b>${s.confidence}%</b></div>
       <div class="conf-meter"><div class="conf-fill ${bear ? "bear" : ""}" style="width:${s.confidence}%"></div></div>
@@ -908,6 +944,7 @@ function renderAllCalls(res) {
       <td class="num">${esc((c.date || "").slice(5))}<div class="fcs">${esc(c.time || "")}</div></td>
       <td>${esc(c.segment)}</td>
       <td>${c.direction === "BULLISH" ? '<span class="vote buy">▲ L</span>' : '<span class="vote sell">▼ S</span>'}</td>
+      <td>${confChip(callConfidence({ segment: c.segment, kind: "desk" }), true)}</td>
       <td class="num">${fmt(c.entry)}</td>
       <td class="num pos">${fmt(c.target1)}${touch(c.t1At, "")}</td>
       <td class="num ${hit2 ? "pos" : ""}">${fmt(c.target2)}${touch(c.t2At, "")}</td>
@@ -933,7 +970,7 @@ function renderAllCalls(res) {
   $("allCallsBody").innerHTML = `
     <div class="pf-note">${head}. Generated ${esc(res.istClock)} IST.</div>
     ${t.calls ? `<div class="table-wrap pf-all-wrap"><table class="research pf-table">
-      <thead><tr><th>Date · IST</th><th>Seg</th><th>Side</th><th>Entry</th><th>T1 · touched</th>
+      <thead><tr><th>Date · IST</th><th>Seg</th><th>Side</th><th>Confidence</th><th>Entry</th><th>T1 · touched</th>
         <th>T2 · touched</th><th>T3 · touched</th><th>SL · touched</th><th>Outcome</th><th>Exit</th><th>MFE</th>
         <th>R</th></tr></thead><tbody>${rows}</tbody></table></div>`
       : `<div class="pf-note neg">No call in the last ${res.days} days matches this filter.</div>`}`;
@@ -1009,6 +1046,7 @@ function renderToday(t) {
       <td class="num">${todayClock(c.t)}</td>
       <td class="name">${esc(c.name)}<div class="fcs">${esc(c.profileKey)}</div></td>
       <td>${c.side === "LONG" ? '<span class="pos">▲ LONG</span>' : '<span class="neg">▼ SHORT</span>'}</td>
+      <td>${confChip(callConfidence({ segment: c.id, kind: "desk" }), true)}</td>
       <td class="num">${fmt(c.entry)}</td>
       <td class="num neg">${fmt(c.stop)}<div class="fcs">${c.sd == null ? "—" : c.sd + " pts"}</div></td>
       <td class="num pos">${fmt(c.t1)}<div class="fcs">${c.m1} pts</div></td>
@@ -1067,7 +1105,7 @@ function renderToday(t) {
     ${callRows ? `<div class="proof-card">
       <div class="pf-h">Every call — ${calls.length} in the session</div>
       <div class="table-wrap" style="max-height:52vh;overflow:auto"><table class="research pf-table">
-        <thead><tr><th>Time</th><th>Segment</th><th>Side</th><th>Entry</th><th>Stop</th>
+        <thead><tr><th>Time</th><th>Segment</th><th>Side</th><th>Confidence</th><th>Entry</th><th>Stop</th>
           <th>T1</th><th>T2</th><th>T3</th><th>R:R</th><th>Result</th><th>Duration</th><th>MFE</th></tr></thead>
         <tbody>${callRows}</tbody></table></div>
       <div class="pf-note">Entry is the 5m close at the decision bar; targets are the same
@@ -1266,6 +1304,7 @@ function clDetail(n) {
   return `<div class="cl-detail">
     <div class="cl-grid">${clLevel(n, "sl", "Stop loss", "sl")}${clLevel(n, "t1", "T1", "t1")}${clLevel(n, "t2", "T2", "t")}${clLevel(n, "t3", "T3", "t")}</div>
     <div class="cl-meta">
+      <span><b>Confidence</b> ${(() => { const c = callConfidence(n); return c.pct == null ? "not measured yet" : `${c.pct}% — ${esc(c.kind)}, measured win rate${c.n ? " over " + c.n + " calls" : ""}`; })()}</span>
       <span><b>Entry</b> ${fmt(n.entry)} at ${clClock(n.t)} IST (${esc(n.date)})</span>
       <span><b>Exit</b> ${tail}${n.pts != null ? ` · <b class="${n.pts >= 0 ? "pos" : "neg"}">${n.pts >= 0 ? "+" : ""}${n.pts} pts</b>` : ""}</span>
       ${n.windowEnd ? `<span><b>Window</b> until ${clClock(n.windowEnd)}</span>` : ""}
@@ -1282,15 +1321,16 @@ function callListHtml(items, id, emptyMsg) {
       <td class="num">${esc(n.date.slice(5))} <b>${clClock(n.t)}</b></td>
       <td class="name"><a href="#" class="cl-idx" data-seg="${esc(n.seg)}">${esc(n.name)}</a><div class="fcs">${esc(n.candle)}${n.term === "long" ? " · long" : ""}</div>${n.grade === "B" ? `<div class="fcs"><span class="fc-badge" title="Looser filter: a lower-confidence call (about 59% win in testing)">B tier</span></div>` : ""}${n.slPts * 0.9 > n.t1.pts + 1e-9 ? `<div class="fcs neg">⚠ stop ${n.slPts} &gt; T1 ${n.t1.pts}</div>` : ""}</td>
       <td>${n.side === "BUY" ? '<span class="pos">▲ BUY</span>' : '<span class="neg">▼ SELL</span>'}</td>
+      <td>${confChip(callConfidence(n), true)}</td>
       <td class="num">${fmt(n.entry)}</td>
       ${clSl(n)}
       ${clTarget(n, "t1")}${clTarget(n, "t2")}${clTarget(n, "t3")}
       <td>${clResultChip(n)}</td>
       <td class="cl-chev">${open ? "▾" : "▸"}</td></tr>
-      <tr class="cl-det ${open ? "" : "hidden"}" data-for="${esc(key)}"><td colspan="10">${clDetail(n)}</td></tr>`;
+      <tr class="cl-det ${open ? "" : "hidden"}" data-for="${esc(key)}"><td colspan="11">${clDetail(n)}</td></tr>`;
   }).join("");
   return `<div class="table-wrap" style="max-height:72vh;overflow:auto"><table class="research pf-table call-list">
-    <thead><tr><th>Time</th><th>Index</th><th>Side</th><th>Entry</th><th>Stop loss</th><th>T1</th><th>T2</th><th>T3</th><th>Result</th><th></th></tr></thead>
+    <thead><tr><th>Time</th><th>Index</th><th>Side</th><th>Confidence</th><th>Entry</th><th>Stop loss</th><th>T1</th><th>T2</th><th>T3</th><th>Result</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>
     <div class="pf-note">✓ time = the target was touched at that time · ✗ time = the stop loss was hit at that time. Click a call for every detail and its exit.</div>`;
 }
@@ -1936,7 +1976,9 @@ function renderOvernight(o) {
     } else if (s.status === "CALL" || s.status === "FORMING") {
       const p = s.plan || {};
       body = `
-        <div class="on-side">▲ BUY AT CLOSE <span class="on-grade">Grade ${esc(p.grade || "—")}</span></div>
+        <div class="on-side">▲ BUY AT CLOSE <span class="on-grade">Grade ${esc(p.grade || "—")}</span>
+          ${confChip({ pct: p.measuredWinRate, n: p.measuredSamples, kind: "Next-day model",
+            basis: "three-year next-close win rate of this rule on " + s.name }, true)}</div>
         <div class="on-plan">
           <div><span>Entry</span><b>${fmt(p.entry)}</b><div class="fcs">${esc(p.entryDate || "—")} close</div></div>
           <div><span>Exit</span><b>next close</b><div class="fcs">audited exit</div></div>
@@ -2165,7 +2207,9 @@ function btstCard(s) {
   return `<div class="on-card ${cardCls}">
     <div class="on-head">
       <div>
-        <div class="on-name">${esc(s.name)}<span class="bt-phase">${esc(s.phase || "")}</span></div>
+        <div class="on-name">${esc(s.name)}<span class="bt-phase">${esc(s.phase || "")}</span>
+          ${plan && plan.confidence != null ? confChip({ pct: plan.confidence, kind: "BTST strategy",
+            basis: "conservative measured win rate of " + (plan.strategy || "the strategy") + " on this index" }, true) : ""}</div>
         <div class="on-sub">${esc(s.sessionDate)} close ${fmt(p.close)} → ${esc(s.nextSession)} open · ${esc(s.dataSource)}</div>
       </div>
       <span class="on-status ${stCls}">${esc(s.statusLabel)}</span>
@@ -2373,6 +2417,8 @@ function n5Row(s) {
   const planCell = s.status === "CALL" && p
     ? `<div class="n5-plan">
          <span class="side ${p.direction === "BULLISH" ? "up" : "down"}">${p.direction === "BULLISH" ? "▲ LONG" : "▼ SHORT"}</span>
+         ${confChip({ pct: a.winRate == null ? null : Number(a.winRate).toFixed(1), n: a.samples, kind: "Stock audit",
+           basis: "this stock's own six-month T1-before-stop audit" }, true)}
          entry <b>${fmt(p.entry)}</b><br>
          <span class="lv">SL</span> ${fmt(p.stop)} · <span class="lv">T1</span> ${fmt(p.t1)}<br>
          <span class="lv">T2</span> ${fmt(p.t2)} · <span class="lv">T3</span> ${fmt(p.t3)}
@@ -2938,6 +2984,8 @@ $("shortModal").addEventListener("click", (e) => { if (e.target.id === "shortMod
 $("todayBtn").addEventListener("click", openToday);
 $("todayClose").addEventListener("click", closeToday);
 $("todayModal").addEventListener("click", (e) => { if (e.target.id === "todayModal") closeToday(); });
+loadCallConfidence();
+setInterval(loadCallConfidence, 300000);
 $("overnightBtn").addEventListener("click", openOvernight);
 $("overnightBtn").addEventListener("click", loadBtst);
 $("overnightClose").addEventListener("click", closeOvernight);
